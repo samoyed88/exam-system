@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS exams (
     shuffle_opt  INTEGER NOT NULL DEFAULT 1,
     show_mode    TEXT NOT NULL DEFAULT 'score' CHECK (show_mode IN ('score', 'answers', 'explain')),
     allowed_ips  TEXT NOT NULL DEFAULT '',     -- 換行分隔 IP 或 CIDR，空 = 不限
-    published    INTEGER NOT NULL DEFAULT 0
+    published    INTEGER NOT NULL DEFAULT 0,
+    review_when  TEXT NOT NULL DEFAULT 'immediate'  -- immediate 交卷後立即、after_close 結束後才公布
 );
 
 CREATE TABLE IF NOT EXISTS exam_questions (
@@ -82,10 +83,23 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# 舊資料庫補欄位：(表, 欄位, 定義)
+MIGRATIONS = [
+    ("exams", "review_when", "TEXT NOT NULL DEFAULT 'immediate'"),
+]
+
+
 def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        for table, column, ddl in MIGRATIONS:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+                except sqlite3.OperationalError:
+                    pass  # 另一個 worker 同時補過了
     finally:
         conn.close()
 

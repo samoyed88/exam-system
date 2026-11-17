@@ -78,16 +78,20 @@
 
   async function loadExams() {
     const exams = await call('GET', '/api/admin/exams');
-    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>限時</th><th>開放時間</th><th>班級</th><th>已進場</th><th></th></tr>' +
-      exams.map(e => '<tr><td>' + esc(e.title) + '</td>' +
-        '<td>' + (e.published ? '<span class="badge ok">已開放</span>' : '<span class="badge">未開放</span>') + '</td>' +
-        '<td>' + e.question_count + '</td><td>' + e.duration_min + ' 分</td>' +
-        '<td>' + esc((e.start_at || '隨時').replace('T', ' ')) + (e.end_at ? ' ~ ' + esc(e.end_at.replace('T', ' ')) : '') + '</td>' +
-        '<td>' + esc(e.class_names || '全部') + '</td><td>' + e.attempt_count + '</td>' +
+    const WINDOW = { not_started: '<span class="badge gray">尚未開放</span>', open: '<span class="badge ok">開放中</span>', closed: '<span class="badge ng">已關閉</span>' };
+    const when = t => t ? esc(t.replace('T', ' ')) : '';
+    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>班級</th><th>打散</th><th>已進場</th><th></th></tr>' +
+      exams.map(e => '<tr><td><b>' + esc(e.title) + '</b></td>' +
+        '<td>' + (e.published ? WINDOW[e.window] : '<span class="badge gray">學生看不到</span>') + '</td>' +
+        '<td>' + e.question_count + '</td><td>' + e.duration_min + ' 分鐘</td>' +
+        '<td class="nowrap">' + (when(e.start_at) || '立即') + ' ～ ' + (when(e.end_at) || '不限') + '</td>' +
+        '<td>' + esc(e.class_names || '全部') + '</td>' +
+        '<td class="nowrap">' + [e.shuffle_q ? '題目' : '', e.shuffle_opt ? '選項' : ''].filter(Boolean).join('、') + '</td>' +
+        '<td>' + e.attempt_count + '</td>' +
         '<td class="row"><button class="btn sm" data-monitor="' + e.id + '">監控／成績</button>' +
         '<button class="btn ghost sm" data-edit="' + e.id + '">編輯</button>' +
         '<button class="btn danger sm" data-del="' + e.id + '">刪除</button></td></tr>').join('');
-    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="8" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
+    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="9" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
   }
 
   $('exam-table').addEventListener('click', async e => {
@@ -108,17 +112,21 @@
     editingExam = id;
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
-      shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
+      review_when: 'immediate', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
     };
     $('exam-form-title').textContent = id ? '編輯考試' : '新增考試';
     $('e-title').value = e.title;
     $('e-duration').value = e.duration_min;
+    $('e-start-on').checked = !!e.start_at;
+    $('e-end-on').checked = !!e.end_at;
     $('e-start').value = e.start_at;
     $('e-end').value = e.end_at;
+    syncTimeInputs();
     $('e-classes').value = e.class_names;
     $('e-show').value = e.show_mode;
-    $('e-shuffle-q').checked = !!e.shuffle_q;
-    $('e-shuffle-opt').checked = !!e.shuffle_opt;
+    $('e-review').value = e.review_when;
+    $('e-shuffle-q').value = e.shuffle_q ? '1' : '0';
+    $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
     $('e-published').checked = !!e.published;
     $('e-ips').value = e.allowed_ips;
     $('e-filter').value = '';
@@ -128,6 +136,13 @@
     $('exam-form').classList.remove('hidden');
     $('exam-form').scrollIntoView({ behavior: 'smooth' });
   }
+
+  function syncTimeInputs() {
+    $('e-start').disabled = !$('e-start-on').checked;
+    $('e-end').disabled = !$('e-end-on').checked;
+  }
+  $('e-start-on').addEventListener('change', syncTimeInputs);
+  $('e-end-on').addEventListener('change', syncTimeInputs);
 
   function qMatches(q, text) {
     text = text.trim().toLowerCase();
@@ -149,6 +164,7 @@
   $('e-filter').addEventListener('input', renderPicker);
   $('e-questions').addEventListener('change', e => {
     const id = +e.target.value;
+    if (!id) return;
     if (e.target.checked) { if (!picked.includes(id)) picked.push(id); }
     else picked = picked.filter(x => x !== id);
     renderPicker();
@@ -165,8 +181,10 @@
   $('save-exam').addEventListener('click', async () => {
     const body = {
       title: $('e-title').value, duration_min: +$('e-duration').value,
-      start_at: $('e-start').value, end_at: $('e-end').value, class_names: $('e-classes').value,
-      show_mode: $('e-show').value, shuffle_q: $('e-shuffle-q').checked, shuffle_opt: $('e-shuffle-opt').checked,
+      start_at: $('e-start-on').checked ? $('e-start').value : '',
+      end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: $('e-classes').value,
+      show_mode: $('e-show').value, review_when: $('e-review').value,
+      shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
     };
     try {
@@ -210,11 +228,11 @@
     const done = data.rows.filter(r => r.status === 'submitted');
     const avg = done.length ? (done.reduce((s, r) => s + r.score, 0) / done.length).toFixed(1) : '-';
     $('mon-summary').innerHTML =
-      '<div><b>' + data.rows.length + '</b><span class="muted">應考</span></div>' +
-      '<div><b>' + count('absent') + '</b><span class="muted">未進場</span></div>' +
-      '<div><b>' + count('in_progress') + '</b><span class="muted">作答中</span></div>' +
-      '<div><b>' + count('submitted') + '</b><span class="muted">已交卷</span></div>' +
-      '<div><b>' + avg + '</b><span class="muted">平均分</span></div>';
+      '<div><b>' + data.rows.length + '</b><span>應考人數</span></div>' +
+      '<div><b>' + count('absent') + '</b><span>未進場</span></div>' +
+      '<div><b style="color:var(--warn)">' + count('in_progress') + '</b><span>作答中</span></div>' +
+      '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
+      '<div><b>' + avg + '</b><span>平均分</span></div>';
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
     $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>班級</th><th>狀態</th><th>進度</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
       data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
@@ -239,12 +257,12 @@
       refreshMonitor();
     }
   });
-  document.querySelector('[data-back]').addEventListener('click', () => openTab('exams'));
+  document.querySelectorAll('[data-back]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openTab('exams'); }));
 
   // ── 各題分析 ──
 
   $('mon-stats').addEventListener('click', loadStats);
-  $('stats-back').addEventListener('click', () => openMonitor(monitorExam));
+  $('stats-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
 
   async function loadStats() {
     show('stats');
@@ -261,9 +279,9 @@
             '</td></tr>').join('') + '</table>').join('');
       } else {
         const max = Math.max(1, ...q.option_counts);
-        detail = '<table>' + q.options.map((o, i) => '<tr><td style="width:40%">' + (q.answer.includes(i) ? '✓ ' : '') +
-          LETTERS[i] + '. ' + esc(o) + '</td><td><div class="bar" style="width:' + (q.option_counts[i] / max * 100) + '%;' +
-          (q.answer.includes(i) ? 'background:var(--ok)' : '') + '"></div></td><td style="width:5rem">' + q.option_counts[i] + ' 人</td></tr>').join('') + '</table>';
+        detail = '<table class="stat-table">' + q.options.map((o, i) => '<tr><td style="width:40%">' + (q.answer.includes(i) ? '✓ ' : '') +
+          LETTERS[i] + '. ' + esc(o) + '</td><td><div class="bar-track"><div class="bar' + (q.answer.includes(i) ? ' right' : '') +
+          '" style="width:' + (q.option_counts[i] / max * 100) + '%"></div></div></td><td style="width:5rem">' + q.option_counts[i] + ' 人</td></tr>').join('') + '</table>';
       }
       return '<div class="card"><div class="q-head"><span class="q-num">' + (n + 1) + '.</span><span class="badge">' + TYPE_TEXT[q.type] + '</span>' +
         '<span class="muted">滿分率 ' + rate + '（' + q.full_marks + ' / ' + q.submitted + '）</span></div>' +

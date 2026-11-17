@@ -157,6 +157,10 @@ def regrade(db, attempt_id: int) -> None:
                (round(total, 2), round(sum(q["points"] for q in qs.values()), 2), attempt_id))
 
 
+def review_ready(exam: sqlite3.Row) -> bool:
+    return exam["review_when"] != "after_close" or exam_window(exam) == "closed"
+
+
 def exam_window(exam: sqlite3.Row) -> str:
     start, end = parse_time(exam["start_at"]), parse_time(exam["end_at"])
     t = now()
@@ -217,7 +221,7 @@ def visible_to(exam: sqlite3.Row, student: sqlite3.Row) -> bool:
 def student_exams(sid: str = Depends(current_student), db=Depends(get_db)):
     student = load_student(db, sid)
     finalize_expired(db)
-    result = []
+    result = {"server_now": now().isoformat(), "exams": []}
     for exam in db.execute("SELECT * FROM exams ORDER BY id DESC").fetchall():
         if not visible_to(exam, student):
             continue
@@ -225,10 +229,12 @@ def student_exams(sid: str = Depends(current_student), db=Depends(get_db)):
                              (exam["id"], sid)).fetchone()
         n = db.execute("SELECT COUNT(*) FROM exam_questions WHERE exam_id = ?",
                        (exam["id"],)).fetchone()[0]
-        result.append({
+        start, end = parse_time(exam["start_at"]), parse_time(exam["end_at"])
+        result["exams"].append({
             "id": exam["id"], "title": exam["title"], "duration_min": exam["duration_min"],
-            "question_count": n, "start_at": exam["start_at"], "end_at": exam["end_at"],
-            "window": exam_window(exam),
+            "question_count": n, "start_at": start.isoformat() if start else "",
+            "end_at": end.isoformat() if end else "", "window": exam_window(exam),
+            "review_when": exam["review_when"],
             "attempt": None if not attempt else {
                 "id": attempt["id"], "submitted": bool(attempt["submitted_at"])},
         })
@@ -241,16 +247,28 @@ def shuffled(items: list, seed: str) -> list:
     return items
 
 
-def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
-    sid = attempt["student_id"]
+def student_questions(db, exam: sqlite3.Row, sid: str) -> list[sqlite3.Row]:
+    """這位學生看到的題目順序（打散結果依學號固定）。"""
     questions = exam_questions(db, exam["id"])
     if exam["shuffle_q"]:
         questions = shuffled(questions, f"q:{exam['id']}:{sid}")
+    return questions
+
+
+def option_order(exam: sqlite3.Row, sid: str, q: sqlite3.Row) -> list[int]:
+    """這位學生看到的選項順序：第 k 個位置顯示原本第 order[k] 個選項。"""
+    order = list(range(len(json.loads(q["options"]))))
+    if exam["shuffle_opt"] and q["type"] != "fill":
+        order = shuffled(order, f"o:{exam['id']}:{sid}:{q['id']}")
+    return order
+
+
+def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
+    sid = attempt["student_id"]
     out = []
-    for q in questions:
-        options = [{"i": i, "text": t} for i, t in enumerate(json.loads(q["options"]))]
-        if exam["shuffle_opt"] and q["type"] != "fill":
-            options = shuffled(options, f"o:{exam['id']}:{sid}:{q['id']}")
+    for q in student_questions(db, exam, sid):
+        texts = json.loads(q["options"])
+        options = [{"i": i, "text": texts[i]} for i in option_order(exam, sid, q)]
         item = {"id": q["id"], "type": q["type"], "stem": q["stem"], "code": q["code"],
                 "points": q["points"], "options": options}
         if q["type"] == "fill":
@@ -376,16 +394,35 @@ def attempt_event(attempt_id: int, body: EventIn,
 def result_payload(db, attempt: sqlite3.Row) -> dict:
     exam = exam_or_404(db, attempt["exam_id"])
     out = {"title": exam["title"], "score": attempt["score"], "max_score": attempt["max_score"],
-           "show_mode": exam["show_mode"], "questions": []}
+           "show_mode": exam["show_mode"], "started_at": attempt["started_at"],
+           "submitted_at": attempt["submitted_at"], "questions": []}
+    if not review_ready(exam):
+        end = parse_time(exam["end_at"])
+        out.update(score=None, max_score=None, pending=True,
+                   release_at=end.isoformat() if end else "")
+        return out
     if exam["show_mode"] == "score":
         return out
     saved = {r["question_id"]: r for r in db.execute(
         "SELECT * FROM answers WHERE attempt_id = ?", (attempt["id"],))}
-    for q in exam_questions(db, exam["id"]):
+    sid = attempt["student_id"]
+    # 用作答時同樣的題目與選項順序呈現，字母才對得上學生當時看到的
+    for q in student_questions(db, exam, sid):
         a = saved.get(q["id"])
+        answer = json.loads(q["answer"])
+        response = json.loads(a["response"]) if a else None
+        texts = json.loads(q["options"])
+        if q["type"] != "fill":
+            order = option_order(exam, sid, q)
+            pos = {orig: k for k, orig in enumerate(order)}
+            texts = [texts[i] for i in order]
+            answer = sorted(pos[i] for i in answer)
+            if isinstance(response, int):
+                response = pos.get(response)
+            elif isinstance(response, list):
+                response = sorted(pos[i] for i in response if i in pos)
         item = {"stem": q["stem"], "code": q["code"], "type": q["type"],
-                "options": json.loads(q["options"]), "answer": json.loads(q["answer"]),
-                "response": json.loads(a["response"]) if a else None,
+                "options": texts, "answer": answer, "response": response,
                 "score": a["score"] if a and a["score"] is not None else 0,
                 "points": q["points"]}
         if exam["show_mode"] == "explain":
@@ -452,6 +489,7 @@ class ExamIn(BaseModel):
     shuffle_q: bool = True
     shuffle_opt: bool = True
     show_mode: str = "score"
+    review_when: str = "immediate"
     allowed_ips: str = ""
     published: bool = False
     question_ids: list[int] = []
@@ -643,13 +681,19 @@ def exam_values(e: ExamIn) -> tuple:
         raise HTTPException(400, "交卷後顯示方式不正確")
     if e.duration_min < 1:
         raise HTTPException(400, "限時至少 1 分鐘")
-    for t in (e.start_at, e.end_at):
-        try:
-            parse_time(t)
-        except ValueError:
-            raise HTTPException(400, f"時間格式不正確：{t}")
+    if e.review_when not in ("immediate", "after_close"):
+        raise HTTPException(400, "成績公布時間不正確")
+    try:
+        start, end = parse_time(e.start_at), parse_time(e.end_at)
+    except ValueError:
+        raise HTTPException(400, "時間格式不正確")
+    if start and end and end <= start:
+        raise HTTPException(400, "關閉時間要晚於開放時間")
+    if e.review_when == "after_close" and not end:
+        raise HTTPException(400, "選「考試關閉後公布成績」時，要設定關閉時間")
     return (e.title.strip(), e.start_at, e.end_at, e.duration_min, e.class_names,
-            int(e.shuffle_q), int(e.shuffle_opt), e.show_mode, e.allowed_ips, int(e.published))
+            int(e.shuffle_q), int(e.shuffle_opt), e.show_mode, e.allowed_ips, int(e.published),
+            e.review_when)
 
 
 def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
@@ -665,7 +709,7 @@ def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
 
 
 EXAM_COLS = ("title, start_at, end_at, duration_min, class_names, shuffle_q, shuffle_opt, "
-             "show_mode, allowed_ips, published")
+             "show_mode, allowed_ips, published, review_when")
 
 
 @app.get("/api/admin/exams", dependencies=[admin])
@@ -674,7 +718,7 @@ def list_exams(db=Depends(get_db)):
         "SELECT e.*, (SELECT COUNT(*) FROM exam_questions WHERE exam_id = e.id) AS question_count, "
         "(SELECT COUNT(*) FROM attempts WHERE exam_id = e.id) AS attempt_count "
         "FROM exams e ORDER BY id DESC").fetchall()
-    return [dict(r) for r in rows]
+    return [{**dict(r), "window": exam_window(r)} for r in rows]
 
 
 @app.get("/api/admin/exams/{exam_id}", dependencies=[admin])
@@ -689,7 +733,7 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     values = exam_values(body)
     db.execute("BEGIN")
     try:
-        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          values)
         set_exam_questions(db, cur.lastrowid, body.question_ids)
         db.execute("COMMIT")

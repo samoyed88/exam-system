@@ -8,65 +8,130 @@
 </head>
 <body>
 <nav class="navbar" id="nav">
-  <span class="navbar-brand">線上考試</span>
+  <span class="navbar-brand"><span class="logo">考</span>線上考試</span>
   <span class="spacer"></span>
   <span class="who" id="who"></span>
   <button class="btn ghost sm hidden" id="logout">登出</button>
 </nav>
 
 <!-- 輸入學號 -->
-<section id="view-login" class="container hidden">
-  <div class="card center">
-    <h1>請輸入學號</h1>
+<section id="view-login" class="hidden">
+  <div class="login-hero">
+    <h1>線上考試系統</h1>
+    <p>請輸入學號進入考試</p>
+  </div>
+  <div class="card login-card">
     <form id="login-form">
+      <label for="sid">學號</label>
       <input type="text" id="sid" placeholder="例如 11201" autocomplete="off" inputmode="numeric" autofocus>
-      <div style="margin-top:1rem"><button class="btn" type="submit">下一步</button></div>
+      <button class="btn lg block" type="submit" style="margin-top:1rem">下一步</button>
     </form>
-    <div id="confirm" class="hidden" style="margin-top:1.25rem">
-      <p>你是 <b id="confirm-name"></b> 嗎？</p>
-      <div class="row" style="justify-content:center">
-        <button class="btn" id="confirm-yes">是我</button>
-        <button class="btn ghost" id="confirm-no">不是</button>
+    <div id="confirm" class="confirm-box hidden">
+      <div class="muted">請確認身分</div>
+      <div class="big" id="confirm-name"></div>
+      <div class="row" style="justify-content:center;margin-top:.9rem">
+        <button class="btn" id="confirm-yes">是我，進入</button>
+        <button class="btn ghost" id="confirm-no">不是我</button>
       </div>
     </div>
     <div class="msg ng" id="login-msg"></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:1.25rem 0 .9rem">
+    <ul class="rules">
+      <li>每一題作答後會自動儲存，重新整理或網路短暫中斷不會遺失答案。</li>
+      <li>時間到系統會自動以已儲存的答案交卷。</li>
+      <li>請勿使用他人學號，系統會記錄作答電腦與連線位置。</li>
+    </ul>
   </div>
 </section>
 
 <!-- 考試清單 -->
 <section id="view-list" class="container hidden">
-  <h1>我的考試</h1>
-  <div id="exam-list"></div>
+  <div class="page-head">
+    <div class="crumbs">首頁</div>
+    <h1>我的考試</h1>
+  </div>
   <div class="msg ng" id="list-msg"></div>
+  <div id="exam-list"></div>
 </section>
 
 <!-- 作答 -->
 <section id="view-take" class="hidden">
-  <div class="exam-bar">
-    <span class="title" id="take-title"></span>
-    <span class="timer" id="timer">--:--</span>
-    <span class="muted" id="progress"></span>
-    <span class="save-state" id="save-state"></span>
-    <span class="spacer" style="flex:1"></span>
-    <button class="btn" id="submit-btn">交卷</button>
+  <div class="mobile-bar">
+    <span class="timer" id="m-timer">--:--</span>
+    <span class="muted" id="m-progress"></span>
+    <span class="spacer"></span>
+    <button class="btn ghost sm" id="m-nav-toggle">題目導覽</button>
+    <button class="btn sm" data-finish>完成作答</button>
   </div>
-  <div class="container">
-    <div class="nav-grid" id="nav-grid"></div>
-    <div id="questions"></div>
-    <div style="text-align:center;margin-top:2rem"><button class="btn" id="submit-btn2">交卷</button></div>
+  <div class="mobile-nav" id="m-nav">
+    <div class="nav-grid" data-grid></div>
+    <div class="save-state" data-save></div>
+  </div>
+  <div class="quiz-layout">
+    <div class="quiz-head">
+      <div class="crumbs"><a href="#" data-to-list>我的考試</a> / 作答中</div>
+      <h1 id="take-title"></h1>
+    </div>
+    <main id="questions"></main>
+    <aside class="quiz-nav">
+      <div class="card desktop">
+        <div class="timer-box" id="timer-box">
+          <div class="label">剩餘時間</div>
+          <div class="timer" id="timer">--:--</div>
+        </div>
+        <div class="nav-title"><span>測驗導覽</span><span class="muted" id="progress"></span></div>
+        <div class="nav-grid" data-grid></div>
+        <div class="legend"><span><i class="done"></i>已作答</span><span><i></i>未作答</span><span><i class="flag"></i>已標記</span></div>
+        <button class="btn block" data-finish>完成作答…</button>
+        <div class="save-state" data-save></div>
+      </div>
+    </aside>
   </div>
 </section>
 
-<!-- 成績 -->
-<section id="view-result" class="container hidden">
-  <div class="card" style="text-align:center">
-    <h1 id="result-title"></h1>
-    <div class="score-big" id="result-score"></div>
-    <p class="muted" id="result-note"></p>
-    <button class="btn ghost" id="back-list">回到考試清單</button>
+<!-- 作答摘要 -->
+<section id="view-summary" class="container hidden">
+  <div class="page-head">
+    <div class="crumbs">我的考試 / 作答中 / 作答摘要</div>
+    <h1 id="sum-title"></h1>
   </div>
-  <div id="result-detail"></div>
+  <div class="card">
+    <div class="card-title">作答摘要</div>
+    <div id="sum-alert"></div>
+    <table class="summary-table" id="sum-table"></table>
+    <div class="row" style="margin-top:1.25rem;justify-content:center">
+      <button class="btn ghost" id="sum-back">回到作答</button>
+      <button class="btn success" id="sum-submit">全部送出並結束</button>
+    </div>
+    <p class="muted" style="text-align:center;margin-top:.75rem">剩餘時間 <b id="sum-timer">--:--</b>，時間到會自動交卷。</p>
+  </div>
 </section>
+
+<!-- 成績與檢視 -->
+<section id="view-result" class="hidden">
+  <div class="quiz-layout">
+    <div class="quiz-head">
+      <div class="crumbs"><a href="#" data-to-list>我的考試</a> / 作答檢視</div>
+      <h1 id="result-title"></h1>
+    </div>
+    <main>
+      <div class="card" id="result-panel"></div>
+      <div id="result-detail"></div>
+    </main>
+    <aside class="quiz-nav" id="result-nav"></aside>
+  </div>
+</section>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-box">
+    <h3 id="modal-title"></h3>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modal-cancel">取消</button>
+      <button class="btn" id="modal-ok">確定</button>
+    </div>
+  </div>
+</div>
 
 <script src="/common.js"></script>
 <script src="/student.js"></script>

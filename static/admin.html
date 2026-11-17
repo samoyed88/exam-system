@@ -8,7 +8,7 @@
 </head>
 <body>
 <nav class="navbar">
-  <span class="navbar-brand">考試後台</span>
+  <span class="navbar-brand"><span class="logo">考</span>考試後台</span>
   <div class="tabs hidden" id="tabs">
     <button data-tab="exams" class="active">考試</button>
     <button data-tab="questions">題庫</button>
@@ -31,52 +31,90 @@
 
 <!-- 考試 -->
 <section id="view-exams" class="container wide hidden">
-  <div class="row"><h1 style="margin:0">考試</h1><button class="btn sm" id="new-exam">新增考試</button></div>
-  <div id="exam-form" class="card hidden" style="margin-top:1rem">
-    <h2 id="exam-form-title" style="margin-top:0">新增考試</h2>
-    <div class="grid2">
-      <div><label>考試名稱</label><input type="text" id="e-title"></div>
-      <div><label>限時（分鐘）</label><input type="number" id="e-duration" min="1" value="50"></div>
-      <div><label>開放時間（空白 = 隨時）</label><input type="datetime-local" id="e-start"></div>
-      <div><label>結束時間（空白 = 不限）</label><input type="datetime-local" id="e-end"></div>
-      <div><label>適用班級（逗號分隔，空白 = 全部）</label><input type="text" id="e-classes" placeholder="701,702"></div>
-      <div><label>交卷後學生看到</label>
-        <select id="e-show">
-          <option value="score">只有總分</option>
-          <option value="answers">總分 + 對錯與正解</option>
-          <option value="explain">總分 + 對錯 + 解析</option>
-        </select></div>
-    </div>
-    <div style="margin-top:.75rem">
-      <label class="check"><input type="checkbox" id="e-shuffle-q" checked> 題目順序亂數</label>
-      <label class="check"><input type="checkbox" id="e-shuffle-opt" checked> 選項順序亂數</label>
-      <label class="check"><input type="checkbox" id="e-published"> 開放給學生看到</label>
-    </div>
-    <label>允許進場的 IP（一行一個，可寫 CIDR；空白 = 不限）</label>
-    <textarea id="e-ips" class="mono" placeholder="203.0.113.10"></textarea>
-    <button class="btn ghost sm" id="add-my-ip" style="margin-top:.4rem">加入我現在的 IP</button>
-    <span class="muted" id="my-ip"></span>
-    <label>題目（勾選要考的題目，依勾選順序出題）</label>
-    <input type="text" id="e-filter" placeholder="依題幹或標籤篩選">
-    <div class="qpick" id="e-questions" style="margin-top:.4rem"></div>
-    <p class="muted" id="e-picked"></p>
-    <div class="row" style="margin-top:1rem">
-      <button class="btn" id="save-exam">儲存</button>
-      <button class="btn ghost" id="cancel-exam">取消</button>
-    </div>
-    <div class="msg" id="exam-msg"></div>
+  <div class="toolbar">
+    <h1>考試</h1>
+    <button class="btn" id="new-exam">＋ 新增考試</button>
   </div>
-  <div class="table-wrap" style="margin-top:1rem"><table id="exam-table"></table></div>
+  <div id="exam-form" class="hidden">
+    <div class="card">
+      <div class="card-title" id="exam-form-title">新增考試</div>
+
+      <fieldset>
+        <legend>一般</legend>
+        <div class="field-row"><label for="e-title">考試名稱</label><input type="text" id="e-title" placeholder="例如 第一次段考"></div>
+        <div class="field-row"><label for="e-classes">適用班級</label>
+          <div><input type="text" id="e-classes" placeholder="701,702"><div class="hint">多個班級用逗號分隔；空白代表名單上所有學生都能考。</div></div></div>
+        <div class="field-row"><label>學生是否看得到</label>
+          <div><label class="check"><input type="checkbox" id="e-published"> 開放給學生（不勾選時學生清單看不到這場考試）</label></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>時間</legend>
+        <div class="field-row"><label>開放作答時間</label>
+          <div><div class="inline"><label class="check"><input type="checkbox" id="e-start-on"> 啟用</label><input type="datetime-local" id="e-start"></div>
+          <div class="hint">不啟用代表儲存後立即開放。</div></div></div>
+        <div class="field-row"><label>關閉時間</label>
+          <div><div class="inline"><label class="check"><input type="checkbox" id="e-end-on"> 啟用</label><input type="datetime-local" id="e-end"></div>
+          <div class="hint">關閉後不能再進場；作答中的學生最晚在這個時間自動交卷。</div></div></div>
+        <div class="field-row"><label for="e-duration">作答時間限制</label>
+          <div><div class="inline"><input type="number" id="e-duration" min="1" value="50"><span>分鐘</span></div>
+          <div class="hint">從學生按「開始作答」起算；時間到由伺服器用已儲存的答案自動交卷。</div></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>題目與選項</legend>
+        <div class="field-row"><label for="e-shuffle-q">題目順序</label>
+          <div><select id="e-shuffle-q"><option value="1">每位學生隨機打散</option><option value="0">依下方勾選的順序</option></select></div></div>
+        <div class="field-row"><label for="e-shuffle-opt">選項順序</label>
+          <div><select id="e-shuffle-opt"><option value="1">每位學生隨機打散</option><option value="0">依題庫中的順序</option></select>
+          <div class="hint">打散結果依學號固定，同一位學生重新整理或換電腦看到的順序不變；填充題不受影響。</div></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>作答檢視與成績</legend>
+        <div class="field-row"><label for="e-show">交卷後學生看得到</label>
+          <div><select id="e-show">
+            <option value="score">只有總分</option>
+            <option value="answers">總分 + 每題對錯與正確答案</option>
+            <option value="explain">總分 + 每題對錯、正確答案與解析</option>
+          </select></div></div>
+        <div class="field-row"><label for="e-review">什麼時候公布</label>
+          <div><select id="e-review"><option value="immediate">交卷後立即</option><option value="after_close">考試關閉後（需設定關閉時間）</option></select>
+          <div class="hint">選「考試關閉後」可避免先考完的學生把答案傳給還在考的人。</div></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>考場限制</legend>
+        <div class="field-row"><label for="e-ips">允許進場的 IP</label>
+          <div><textarea id="e-ips" class="mono" placeholder="203.0.113.10"></textarea>
+          <div class="inline" style="margin-top:.4rem"><button class="btn ghost sm" id="add-my-ip">加入我現在的 IP</button><span class="muted" id="my-ip"></span></div>
+          <div class="hint">一行一個，可寫 CIDR（例如 203.0.113.0/24）；空白代表不限制。在電腦教室按一下就能加入學校的 IP。</div></div></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>題目</legend>
+        <input type="text" id="e-filter" placeholder="依題幹或標籤篩選" style="margin-top:.5rem">
+        <div class="qpick" id="e-questions" style="margin-top:.5rem"></div>
+        <p class="muted" id="e-picked" style="margin:.5rem 0 0"></p>
+      </fieldset>
+
+      <div class="row">
+        <button class="btn" id="save-exam">儲存</button>
+        <button class="btn ghost" id="cancel-exam">取消</button>
+      </div>
+      <div class="msg" id="exam-msg"></div>
+    </div>
+  </div>
+  <div class="table-wrap"><table id="exam-table"></table></div>
 </section>
 
 <!-- 考場監控 -->
 <section id="view-monitor" class="container wide hidden">
-  <div class="row">
-    <button class="btn ghost sm" data-back>← 回考試列表</button>
-    <h1 style="margin:0" id="mon-title"></h1>
+  <div class="crumbs"><a href="#" data-back>考試</a> / 考場監控</div>
+  <div class="toolbar">
+    <h1 id="mon-title"></h1>
     <span class="muted">每 5 秒自動更新</span>
-    <span class="spacer" style="flex:1"></span>
-    <a class="btn ghost sm" id="mon-csv">匯出成績 CSV</a>
+    <a class="btn ghost sm" id="mon-csv" href="#">匯出成績 CSV</a>
     <button class="btn ghost sm" id="mon-stats">各題分析</button>
   </div>
   <div class="summary" id="mon-summary"></div>
@@ -85,19 +123,17 @@
 
 <!-- 各題分析 -->
 <section id="view-stats" class="container wide hidden">
-  <div class="row">
-    <button class="btn ghost sm" id="stats-back">← 回考場監控</button>
-    <h1 style="margin:0" id="stats-title"></h1>
-  </div>
-  <p class="muted">填充題列出每一格所有不同答法；漏掉的正確寫法按「算對」，會加入答案並重新計算所有人分數。</p>
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="stats-back">考場監控</a> / 各題分析</div>
+  <div class="toolbar"><h1 id="stats-title"></h1></div>
+  <p class="alert info">填充題列出每一格所有不同答法；漏掉的正確寫法按「算對」，會加入答案並重新計算所有人分數。</p>
   <div id="stats-body"></div>
 </section>
 
 <!-- 題庫 -->
 <section id="view-questions" class="container wide hidden">
-  <div class="row">
-    <h1 style="margin:0">題庫</h1>
-    <button class="btn sm" id="new-q">新增題目</button>
+  <div class="toolbar">
+    <h1>題庫</h1>
+    <button class="btn" id="new-q">＋ 新增題目</button>
     <label class="btn ghost sm" style="margin:0;color:var(--text)">匯入 CSV<input type="file" id="q-file" accept=".csv" hidden></label>
     <a class="muted" href="/samples/questions.csv" download>下載範例 CSV</a>
   </div>
@@ -124,13 +160,13 @@
     <div class="msg" id="q-form-msg"></div>
   </div>
   <input type="text" id="q-filter" placeholder="依題幹或標籤篩選" style="margin-top:1rem">
-  <div class="table-wrap" style="margin-top:.5rem"><table id="q-table"></table></div>
+  <div class="table-wrap" style="margin-top:.75rem"><table id="q-table"></table></div>
 </section>
 
 <!-- 名單 -->
 <section id="view-students" class="container wide hidden">
-  <div class="row">
-    <h1 style="margin:0">學生名單</h1>
+  <div class="toolbar">
+    <h1>學生名單</h1>
     <label class="btn ghost sm" style="margin:0;color:var(--text)">匯入 CSV<input type="file" id="s-file" accept=".csv" hidden></label>
     <label class="check"><input type="checkbox" id="s-replace"> 匯入時清除舊名單（有作答紀錄的保留）</label>
     <a class="muted" href="/samples/students.csv" download>下載範例 CSV</a>
@@ -142,7 +178,7 @@
     <button class="btn sm" id="add-s">新增／更新</button>
   </div>
   <div class="msg" id="s-msg"></div>
-  <div class="table-wrap"><table id="s-table"></table></div>
+  <div class="table-wrap" style="margin-top:.75rem"><table id="s-table"></table></div>
 </section>
 
 <script src="/common.js"></script>

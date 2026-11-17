@@ -79,7 +79,7 @@ def test_unknown_student_rejected(client):
 def test_full_exam_flow(client):
     h, exam_id = setup_exam(client)
     s = student_headers(client, "11201")
-    exams = client.get("/api/exams", headers=s).json()
+    exams = client.get("/api/exams", headers=s).json()["exams"]
     assert [e["id"] for e in exams] == [exam_id]
 
     started = client.post(f"/api/exams/{exam_id}/start", json={"device": "A01"}, headers=s).json()
@@ -112,11 +112,11 @@ def test_full_exam_flow(client):
 
 def test_class_filter_and_unpublished(client):
     h, exam_id = setup_exam(client, class_names="701")
-    assert client.get("/api/exams", headers=student_headers(client, "11203")).json() == []
+    assert client.get("/api/exams", headers=student_headers(client, "11203")).json()["exams"] == []
     assert client.post(f"/api/exams/{exam_id}/start", json={},
                        headers=student_headers(client, "11203")).status_code == 403
     _, hidden = setup_exam(client, published=False)
-    ids = [e["id"] for e in client.get("/api/exams", headers=student_headers(client, "11201")).json()]
+    ids = [e["id"] for e in client.get("/api/exams", headers=student_headers(client, "11201")).json()["exams"]]
     assert hidden not in ids
 
 
@@ -215,3 +215,43 @@ def test_answer_rejected_after_deadline_grace(client):
     conn.close()
     r = client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": 0}, headers=s)
     assert r.status_code == 409
+
+
+def test_exam_window_and_review_after_close(client):
+    h, _ = setup_exam(client)
+    future = {"title": "未開始", "published": True, "question_ids": [1],
+              "start_at": "2999-01-01T08:00", "end_at": "2999-01-01T09:00"}
+    fid = client.post("/api/admin/exams", json=future, headers=h).json()["id"]
+    s = student_headers(client, "11201")
+    assert client.post(f"/api/exams/{fid}/start", json={}, headers=s).status_code == 403
+    bad = {**future, "end_at": "2999-01-01T07:00"}
+    assert client.post("/api/admin/exams", json=bad, headers=h).status_code == 400
+    need_end = {"title": "x", "question_ids": [1], "review_when": "after_close"}
+    assert client.post("/api/admin/exams", json=need_end, headers=h).status_code == 400
+
+    later = {"title": "結束後公布", "published": True, "question_ids": [1], "show_mode": "explain",
+             "review_when": "after_close", "end_at": "2999-01-01T09:00"}
+    lid = client.post("/api/admin/exams", json=later, headers=h).json()["id"]
+    aid = client.post(f"/api/exams/{lid}/start", json={}, headers=s).json()["attempt_id"]
+    client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": 0}, headers=s)
+    r = client.post(f"/api/attempts/{aid}/submit", headers=s).json()
+    assert r["pending"] and r["score"] is None and r["questions"] == []
+    # 老師端仍看得到分數
+    rows = client.get(f"/api/admin/exams/{lid}/monitor", headers=h).json()["rows"]
+    assert next(x for x in rows if x["student_id"] == "11201")["score"] == 2
+
+
+def test_review_uses_same_shuffled_option_letters(client):
+    h, exam_id = setup_exam(client)  # 預設打散題目與選項
+    s = student_headers(client, "11201")
+    started = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()
+    aid = started["attempt_id"]
+    single = next(q for q in started["questions"] if q["type"] == "single")
+    shown = [o["i"] for o in single["options"]]          # 學生看到的順序（原始索引）
+    client.put(f"/api/attempts/{aid}/answers", json={"question_id": single["id"], "response": 0},
+               headers=s)                                 # 選原本的第 0 個（正解）
+    result = client.post(f"/api/attempts/{aid}/submit", headers=s).json()
+    assert [q["stem"] for q in result["questions"]] == [q["stem"] for q in started["questions"]]
+    rq = next(q for q in result["questions"] if q["type"] == "single")
+    assert rq["options"] == [o["text"] for o in single["options"]]
+    assert rq["response"] == shown.index(0) and rq["answer"] == [shown.index(0)]
