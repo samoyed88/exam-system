@@ -86,6 +86,14 @@
           </select>
           <div class="inline hidden" id="e-review-at-wrap" style="margin-top:.5rem"><span>公布時間</span><input type="datetime-local" id="e-review-at"></div>
           <div class="hint">選「考試關閉後」或「指定時間」可避免先考完的學生把答案傳給還在考的人；公布前學生只看得到「已交卷」。</div></div></div>
+        <div class="field-row"><label for="e-allow-review">可否回頭複習</label>
+          <div><select id="e-allow-review">
+            <option value="always">可以，隨時從「我的考試」重新查看</option>
+            <option value="until">可以，到指定時間為止</option>
+            <option value="no">不行，只在交卷當下看一次</option>
+          </select>
+          <div class="inline hidden" id="e-review-until-wrap" style="margin-top:.5rem"><span>複習截止</span><input type="datetime-local" id="e-review-until"></div>
+          <div class="hint">複習內容依上面「交卷後學生看得到」的設定；不開放或過了截止時間後，學生只看得到總分。</div></div></div>
       </fieldset>
 
       <fieldset>

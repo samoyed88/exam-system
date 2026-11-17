@@ -112,7 +112,7 @@
     editingExam = id;
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
-      review_when: 'immediate', review_at: '', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
+      review_when: 'immediate', review_at: '', allow_review: 1, review_until: '', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
     };
     $('exam-form-title').textContent = id ? '編輯考試' : '新增考試';
     $('e-title').value = e.title;
@@ -126,6 +126,8 @@
     $('e-show').value = e.show_mode;
     $('e-review').value = e.review_when;
     $('e-review-at').value = e.review_at || '';
+    $('e-allow-review').value = !e.allow_review ? 'no' : e.review_until ? 'until' : 'always';
+    $('e-review-until').value = e.review_until || '';
     syncReview();
     $('e-shuffle-q').value = e.shuffle_q ? '1' : '0';
     $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
@@ -145,8 +147,10 @@
   }
   function syncReview() {
     $('e-review-at-wrap').classList.toggle('hidden', $('e-review').value !== 'at_time');
+    $('e-review-until-wrap').classList.toggle('hidden', $('e-allow-review').value !== 'until');
   }
   $('e-review').addEventListener('change', syncReview);
+  $('e-allow-review').addEventListener('change', syncReview);
   $('e-start-on').addEventListener('change', syncTimeInputs);
   $('e-end-on').addEventListener('change', syncTimeInputs);
 
@@ -190,6 +194,8 @@
       start_at: $('e-start-on').checked ? $('e-start').value : '',
       end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: $('e-classes').value,
       show_mode: $('e-show').value, review_when: $('e-review').value, review_at: $('e-review-at').value,
+      allow_review: $('e-allow-review').value !== 'no',
+      review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
       shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
     };

@@ -277,3 +277,30 @@ def test_review_at_fixed_time(client):
     assert client.put(f"/api/admin/exams/{eid}", json=body, headers=h).status_code == 200
     r = client.get(f"/api/attempts/{aid}/result", headers=s).json()
     assert r["score"] == 2 and len(r["questions"]) == 1
+
+
+def test_review_settings(client):
+    h, _ = setup_exam(client)
+    s = student_headers(client, "11201")
+
+    def make(**kw):
+        body = {"title": "複習", "published": True, "question_ids": [1], "show_mode": "explain", **kw}
+        eid = client.post("/api/admin/exams", json=body, headers=h).json()["id"]
+        aid = client.post(f"/api/exams/{eid}/start", json={}, headers=s).json()["attempt_id"]
+        client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": 0}, headers=s)
+        return aid, client.post(f"/api/attempts/{aid}/submit", headers=s).json()
+
+    # 不開放複習：交卷當下看得到詳解，之後只看總分
+    aid, first = make(allow_review=False)
+    assert len(first["questions"]) == 1
+    conn = db.connect()
+    conn.execute("UPDATE attempts SET submitted_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (aid,))
+    conn.close()
+    later = client.get(f"/api/attempts/{aid}/result", headers=s).json()
+    assert later["score"] == 2 and later["questions"] == [] and later["review_closed"]
+
+    # 複習截止已過 → 只看總分；未過 → 看得到
+    aid, _ = make(review_until="2000-01-01T00:00")
+    assert client.get(f"/api/attempts/{aid}/result", headers=s).json()["questions"] == []
+    aid, _ = make(review_until="2999-01-01T00:00")
+    assert len(client.get(f"/api/attempts/{aid}/result", headers=s).json()["questions"]) == 1

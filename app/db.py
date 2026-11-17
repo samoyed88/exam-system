@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS exams (
     allowed_ips  TEXT NOT NULL DEFAULT '',     -- 換行分隔 IP 或 CIDR，空 = 不限
     published    INTEGER NOT NULL DEFAULT 0,
     review_when  TEXT NOT NULL DEFAULT 'immediate',  -- immediate 交卷後立即、after_close 結束後、at_time 指定時間
-    review_at    TEXT NOT NULL DEFAULT ''            -- review_when = at_time 時的公布時間
+    review_at    TEXT NOT NULL DEFAULT '',           -- review_when = at_time 時的公布時間
+    allow_review INTEGER NOT NULL DEFAULT 1,         -- 0 = 只在交卷當下看一次詳解，之後只看總分
+    review_until TEXT NOT NULL DEFAULT ''            -- 可回頭複習的截止時間，空 = 不限
 );
 
 CREATE TABLE IF NOT EXISTS exam_questions (
@@ -88,6 +90,8 @@ def connect() -> sqlite3.Connection:
 MIGRATIONS = [
     ("exams", "review_when", "TEXT NOT NULL DEFAULT 'immediate'"),
     ("exams", "review_at", "TEXT NOT NULL DEFAULT ''"),
+    ("exams", "allow_review", "INTEGER NOT NULL DEFAULT 1"),
+    ("exams", "review_until", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

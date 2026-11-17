@@ -171,6 +171,14 @@ def review_ready(exam: sqlite3.Row) -> bool:
     return release is None or now() >= release
 
 
+def review_open(exam: sqlite3.Row) -> bool:
+    """事後能不能回頭查看每題作答（交卷當下那一次不受限）。"""
+    if not exam["allow_review"]:
+        return False
+    until = parse_time(exam["review_until"])
+    return until is None or now() <= until
+
+
 def exam_window(exam: sqlite3.Row) -> str:
     start, end = parse_time(exam["start_at"]), parse_time(exam["end_at"])
     t = now()
@@ -246,6 +254,9 @@ def student_exams(sid: str = Depends(current_student), db=Depends(get_db)):
             "end_at": end.isoformat() if end else "", "window": exam_window(exam),
             "review_when": exam["review_when"],
             "release_at": release_time(exam).isoformat() if release_time(exam) else "",
+            "allow_review": bool(exam["allow_review"]) and exam["show_mode"] != "score",
+            "review_until": parse_time(exam["review_until"]).isoformat()
+            if exam["review_until"] else "",
             "attempt": None if not attempt else {
                 "id": attempt["id"], "submitted": bool(attempt["submitted_at"])},
         })
@@ -402,7 +413,7 @@ def attempt_event(attempt_id: int, body: EventIn,
     return {"ok": True}
 
 
-def result_payload(db, attempt: sqlite3.Row) -> dict:
+def result_payload(db, attempt: sqlite3.Row, just_submitted: bool = False) -> dict:
     exam = exam_or_404(db, attempt["exam_id"])
     out = {"title": exam["title"], "score": attempt["score"], "max_score": attempt["max_score"],
            "show_mode": exam["show_mode"], "started_at": attempt["started_at"],
@@ -413,6 +424,9 @@ def result_payload(db, attempt: sqlite3.Row) -> dict:
                    release_at=release.isoformat() if release else "")
         return out
     if exam["show_mode"] == "score":
+        return out
+    if not just_submitted and not review_open(exam):
+        out["review_closed"] = True
         return out
     saved = {r["question_id"]: r for r in db.execute(
         "SELECT * FROM answers WHERE attempt_id = ?", (attempt["id"],))}
@@ -446,7 +460,11 @@ def result_payload(db, attempt: sqlite3.Row) -> dict:
 def submit_attempt(attempt_id: int, sid: str = Depends(current_student), db=Depends(get_db)):
     own_attempt(db, attempt_id, sid)
     finalize(db, attempt_id)
-    return result_payload(db, own_attempt(db, attempt_id, sid))
+    attempt = own_attempt(db, attempt_id, sid)
+    # 交卷後 2 分鐘內算「交卷當下」，一定給看詳解（若老師開放且已公布）；之後依複習設定。
+    # 用時間判斷而不是「這次才交」，因為時間到可能是伺服器先代交、瀏覽器隨後才送來
+    fresh = now() - datetime.fromisoformat(attempt["submitted_at"]) < timedelta(minutes=2)
+    return result_payload(db, attempt, just_submitted=fresh)
 
 
 @app.get("/api/attempts/{attempt_id}/result")
@@ -502,6 +520,8 @@ class ExamIn(BaseModel):
     show_mode: str = "score"
     review_when: str = "immediate"
     review_at: str = ""
+    allow_review: bool = True
+    review_until: str = ""
     allowed_ips: str = ""
     published: bool = False
     question_ids: list[int] = []
@@ -698,6 +718,7 @@ def exam_values(e: ExamIn) -> tuple:
     try:
         start, end = parse_time(e.start_at), parse_time(e.end_at)
         review_at = parse_time(e.review_at)
+        parse_time(e.review_until)
     except ValueError:
         raise HTTPException(400, "時間格式不正確")
     if start and end and end <= start:
@@ -708,7 +729,8 @@ def exam_values(e: ExamIn) -> tuple:
         raise HTTPException(400, "選「指定時間公布成績」時，要設定公布時間")
     return (e.title.strip(), e.start_at, e.end_at, e.duration_min, e.class_names,
             int(e.shuffle_q), int(e.shuffle_opt), e.show_mode, e.allowed_ips, int(e.published),
-            e.review_when, e.review_at if e.review_when == "at_time" else "")
+            e.review_when, e.review_at if e.review_when == "at_time" else "",
+            int(e.allow_review), e.review_until if e.allow_review else "")
 
 
 def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
@@ -724,7 +746,7 @@ def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
 
 
 EXAM_COLS = ("title, start_at, end_at, duration_min, class_names, shuffle_q, shuffle_opt, "
-             "show_mode, allowed_ips, published, review_when, review_at")
+             "show_mode, allowed_ips, published, review_when, review_at, allow_review, review_until")
 
 
 @app.get("/api/admin/exams", dependencies=[admin])
@@ -748,7 +770,7 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     values = exam_values(body)
     db.execute("BEGIN")
     try:
-        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          values)
         set_exam_questions(db, cur.lastrowid, body.question_ids)
         db.execute("COMMIT")

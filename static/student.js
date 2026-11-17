@@ -130,7 +130,12 @@
       return '已交卷，成績將於 ' + fmtDateTime(ex.release_at) + ' 公布（還有 <b class="countdown">' +
         fmtSpan((Date.parse(ex.release_at) - now) / 1000) + '</b>）。';
     }
-    if (st === 'submitted') return '已交卷，可以查看成績。';
+    if (st === 'submitted') {
+      if (!ex.allow_review) return '已交卷，可以查看總分。';
+      if (ex.review_until && now > Date.parse(ex.review_until)) return '已交卷，複習期限已過，只能查看總分。';
+      if (ex.review_until) return '已交卷，可以複習作答到 ' + fmtDateTime(ex.review_until) + '。';
+      return '已交卷，可以查看成績與複習作答。';
+    }
     return '';
   }
 
@@ -512,7 +517,8 @@
       $('result-panel').innerHTML = '<div class="score-panel"><div class="score-ring" style="--pct:' + pct + '">' +
         '<span>' + pct + '%</span><small>' + r.score + ' / ' + r.max_score + '</small></div>' +
         '<div style="flex:1;min-width:240px">' + info + '</div></div>' +
-        (r.show_mode === 'score' ? '<p class="muted" style="margin:.9rem 0 0">老師設定只公布總分。</p>' : '');
+        (r.show_mode === 'score' ? '<p class="muted" style="margin:.9rem 0 0">老師設定只公布總分。</p>' :
+          r.review_closed ? '<div class="alert info" style="margin-bottom:0">這場考試不開放回頭複習，或複習期限已過，只能查看總分。</div>' : '');
     }
     $('result-detail').innerHTML = r.questions.map((q, n) => {
       const [cls, badge] = verdict(q);
