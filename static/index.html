@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>線上考試</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<nav class="navbar" id="nav">
+  <span class="navbar-brand">線上考試</span>
+  <span class="spacer"></span>
+  <span class="who" id="who"></span>
+  <button class="btn ghost sm hidden" id="logout">登出</button>
+</nav>
+
+<!-- 輸入學號 -->
+<section id="view-login" class="container hidden">
+  <div class="card center">
+    <h1>請輸入學號</h1>
+    <form id="login-form">
+      <input type="text" id="sid" placeholder="例如 11201" autocomplete="off" inputmode="numeric" autofocus>
+      <div style="margin-top:1rem"><button class="btn" type="submit">下一步</button></div>
+    </form>
+    <div id="confirm" class="hidden" style="margin-top:1.25rem">
+      <p>你是 <b id="confirm-name"></b> 嗎？</p>
+      <div class="row" style="justify-content:center">
+        <button class="btn" id="confirm-yes">是我</button>
+        <button class="btn ghost" id="confirm-no">不是</button>
+      </div>
+    </div>
+    <div class="msg ng" id="login-msg"></div>
+  </div>
+</section>
+
+<!-- 考試清單 -->
+<section id="view-list" class="container hidden">
+  <h1>我的考試</h1>
+  <div id="exam-list"></div>
+  <div class="msg ng" id="list-msg"></div>
+</section>
+
+<!-- 作答 -->
+<section id="view-take" class="hidden">
+  <div class="exam-bar">
+    <span class="title" id="take-title"></span>
+    <span class="timer" id="timer">--:--</span>
+    <span class="muted" id="progress"></span>
+    <span class="save-state" id="save-state"></span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn" id="submit-btn">交卷</button>
+  </div>
+  <div class="container">
+    <div class="nav-grid" id="nav-grid"></div>
+    <div id="questions"></div>
+    <div style="text-align:center;margin-top:2rem"><button class="btn" id="submit-btn2">交卷</button></div>
+  </div>
+</section>
+
+<!-- 成績 -->
+<section id="view-result" class="container hidden">
+  <div class="card" style="text-align:center">
+    <h1 id="result-title"></h1>
+    <div class="score-big" id="result-score"></div>
+    <p class="muted" id="result-note"></p>
+    <button class="btn ghost" id="back-list">回到考試清單</button>
+  </div>
+  <div id="result-detail"></div>
+</section>
+
+<script src="/common.js"></script>
+<script src="/student.js"></script>
+</body>
+</html>

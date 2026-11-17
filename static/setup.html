@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>設定電腦代碼</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="container">
+  <div class="card center">
+    <h1>設定這台電腦的代碼</h1>
+    <p class="muted">考前在每台考場電腦開一次。之後這台電腦登入的學號會記錄這個代碼，同一台登入兩個學號時後台會標示。</p>
+    <form id="f">
+      <input type="text" id="pc" placeholder="例如 A01" autocomplete="off">
+      <div style="margin-top:1rem"><button class="btn" type="submit">儲存</button></div>
+    </form>
+    <div class="msg ok" id="msg"></div>
+    <p style="margin-top:1rem"><a href="/">前往考試首頁</a></p>
+  </div>
+</div>
+<script src="/common.js"></script>
+<script>
+(function () {
+  var pc = document.getElementById('pc');
+  var msg = document.getElementById('msg');
+  var fromUrl = new URLSearchParams(location.search).get('pc');
+  pc.value = fromUrl || exam.store('exam_pc') || '';
+  function save() {
+    var v = pc.value.trim().slice(0, 40);
+    if (!v) return;
+    exam.store('exam_pc', v);
+    msg.textContent = exam.store('exam_pc') === v
+      ? '已設定為「' + v + '」' : '這個瀏覽器無法儲存（可能是無痕模式）';
+  }
+  if (fromUrl) save();
+  document.getElementById('f').addEventListener('submit', function (e) { e.preventDefault(); save(); });
+})();
+</script>
+</body>
+</html>

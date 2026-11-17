@@ -1,0 +1,7 @@
+type,stem,code,A,B,C,D,E,F,answer,explanation,points,multi_mode,tags
+single,下面程式最後會印出什麼？,"a = 3
+b = a
+a = 8
+print(b)",3,8,11,發生錯誤,,,A,b = a 當下把 3 綁定給 b，之後改 a 不影響 b。,2,all,變數
+multi,下列哪些是 Python 的資料型別？（多選）,,int,str,char,list,float,,A;B;D;E,Python 沒有 char 型別，單一字元也是 str。,4,partial,資料型別
+fill,臺灣的首都是 ___，第二大城是 ___。,,,,,,,,臺北|台北;新北,第一格兩種寫法都算對。,2,all,常識

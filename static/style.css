@@ -1,0 +1,155 @@
+/* 深色主題，配色沿用 tutor_python 講義站 */
+:root {
+  --bg: #0f172a;
+  --bg-secondary: #1e293b;
+  --bg-code: #020617;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #60a5fa;
+  --accent-light: #1e3a5f;
+  --border: #334155;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --ng: #f87171;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  font-size: 16px;
+}
+
+.navbar {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 1.5rem;
+  display: flex; align-items: center; gap: 1rem;
+  min-height: 56px; position: sticky; top: 0; z-index: 100; flex-wrap: wrap;
+}
+.navbar-brand { font-weight: 700; color: var(--accent); }
+.navbar .spacer { flex: 1; }
+.navbar .who { color: var(--text-muted); font-size: .9rem; }
+
+.container { max-width: 880px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+.container.wide { max-width: 1280px; }
+h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+h2 { font-size: 1.2rem; margin: 1.5rem 0 .75rem; }
+h3 { font-size: 1rem; margin: 1rem 0 .5rem; }
+p { margin-bottom: .75rem; }
+a { color: var(--accent); }
+.muted { color: var(--text-muted); font-size: .9rem; }
+.hidden { display: none !important; }
+
+.card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin-bottom: 1rem;
+}
+.card.center { max-width: 420px; margin: 3rem auto; text-align: center; }
+
+label { display: block; font-size: .8rem; color: var(--text-muted); font-weight: 600; margin: .6rem 0 .25rem; }
+input[type=text], input[type=password], input[type=number], input[type=datetime-local],
+select, textarea {
+  width: 100%; padding: .55rem .8rem; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg-code);
+  color: var(--text); font-size: 1rem; font-family: inherit; outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+textarea { min-height: 5rem; resize: vertical; }
+textarea.mono, pre, code { font-family: 'Fira Code', Consolas, Menlo, monospace; font-size: .9rem; }
+.check { display: inline-flex; align-items: center; gap: .4rem; margin-right: 1rem; font-size: .9rem; color: var(--text); font-weight: 400; }
+
+.btn {
+  display: inline-block; padding: .55rem 1.2rem; border-radius: 8px; border: none;
+  background: #2563eb; color: white; font-weight: 600; font-size: .95rem;
+  cursor: pointer; font-family: inherit; text-decoration: none;
+}
+.btn:hover { background: #1d4ed8; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.ghost { background: none; border: 1px solid var(--border); color: var(--text); }
+.btn.ghost:hover { border-color: var(--accent); }
+.btn.danger { background: none; border: 1px solid #ef4444; color: var(--ng); }
+.btn.sm { padding: .3rem .7rem; font-size: .82rem; }
+.row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 1rem; }
+
+.msg { margin-top: .75rem; min-height: 1.2em; font-size: .9rem; }
+.msg.ok { color: var(--ok); }
+.msg.ng { color: var(--ng); }
+
+.badge { display: inline-block; padding: .1rem .55rem; border-radius: 99px; font-size: .75rem; font-weight: 700; background: var(--accent-light); color: var(--accent); }
+.badge.ok { background: #14532d; color: var(--ok); }
+.badge.warn { background: #422006; color: var(--warn); }
+.badge.ng { background: #450a0a; color: var(--ng); }
+
+pre { background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: .75rem 1rem; overflow-x: auto; margin: .5rem 0; white-space: pre; }
+
+/* ── 作答 ── */
+.exam-bar {
+  position: sticky; top: 0; z-index: 50;
+  background: var(--bg-secondary); border-bottom: 1px solid var(--border);
+  padding: .6rem 1rem; display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+}
+.exam-bar .title { font-weight: 700; }
+.timer { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 1.1rem; }
+.timer.low { color: var(--ng); }
+.save-state { font-size: .8rem; color: var(--text-muted); }
+.save-state.ng { color: var(--ng); }
+
+.q { scroll-margin-top: 80px; }
+.q-head { display: flex; gap: .5rem; align-items: baseline; margin-bottom: .5rem; }
+.q-num { font-weight: 700; color: var(--accent); }
+.q-stem { white-space: pre-wrap; }
+.opt {
+  display: flex; gap: .6rem; align-items: flex-start;
+  padding: .55rem .8rem; margin: .4rem 0; border-radius: 8px;
+  border: 1px solid var(--border); cursor: pointer; font-size: 1rem; color: var(--text); font-weight: 400;
+}
+.opt:hover { border-color: var(--accent); }
+.opt input { margin-top: .35rem; }
+.opt.picked { border-color: var(--accent); background: var(--accent-light); }
+.opt.right { border-color: var(--ok); }
+.opt.wrong { border-color: var(--ng); }
+.blank-row { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
+.blank-row span { white-space: nowrap; color: var(--text-muted); font-size: .9rem; }
+
+.nav-grid { display: flex; flex-wrap: wrap; gap: .35rem; margin: .5rem 0 1rem; }
+.nav-grid a {
+  width: 2.2rem; height: 2.2rem; display: flex; align-items: center; justify-content: center;
+  border-radius: 6px; border: 1px solid var(--border); color: var(--text-muted);
+  text-decoration: none; font-size: .85rem;
+}
+.nav-grid a.done { background: var(--accent-light); color: var(--accent); border-color: var(--accent); }
+
+.score-big { font-size: 3rem; font-weight: 800; color: var(--accent); }
+
+/* ── 後台 ── */
+.tabs { display: flex; gap: .25rem; }
+.tabs button {
+  background: none; border: none; color: var(--text-muted); font: inherit;
+  padding: .9rem .8rem; cursor: pointer; border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+th, td { text-align: left; padding: .45rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--text-muted); font-weight: 600; }
+tr.flagged td { background: #2a1215; }
+.table-wrap { overflow-x: auto; }
+.bar { height: .6rem; background: var(--accent); border-radius: 3px; }
+.qpick { max-height: 360px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: .5rem; }
+.qpick label { font-weight: 400; color: var(--text); font-size: .9rem; margin: .2rem 0; display: flex; gap: .5rem; }
+.summary { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: .5rem 0 1rem; }
+.summary b { font-size: 1.4rem; display: block; }
+
+@media (max-width: 600px) {
+  .navbar { padding: 0 1rem; }
+  .container { padding: 1.25rem 1rem 3rem; }
+  .card { padding: 1rem; }
+}
