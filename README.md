@@ -61,12 +61,14 @@ sqlite3 data/exam.db ".backup data/backup-$(date +%Y%m%d-%H%M).db"
 
 ## CSV 格式
 
-名單 `static/samples/students.csv`：
+名單：後台「名單」可以直接上傳學校的成績登記表（`.xlsx`），系統會在每個工作表裡找含「學號」「姓名」的表頭列，只讀這兩欄。也可以上傳 CSV（`static/samples/students.csv`）：
 
 ```
-student_id,name,class_name
-11201,王小明,701
+學號,姓名
+11201,王小明
 ```
+
+目前介面以單一班級為主，班級欄位不用填。
 
 題庫 `static/samples/questions.csv`：欄位 `type,stem,code,A,B,C,D,E,F,answer,explanation,points,multi_mode,tags`
 

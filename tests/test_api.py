@@ -304,3 +304,52 @@ def test_review_settings(client):
     assert client.get(f"/api/attempts/{aid}/result", headers=s).json()["questions"] == []
     aid, _ = make(review_until="2999-01-01T00:00")
     assert len(client.get(f"/api/attempts/{aid}/result", headers=s).json()["questions"]) == 1
+
+
+def school_gradebook_xlsx() -> str:
+    """仿學校成績登記表版型的假資料：前面有標題列，第 7 列才是表頭，學號有的存成數字。"""
+    import base64
+    import io
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet"
+    ws.append([])
+    ws.append([None, "班級\nClass", None, "99999測試一甲", None, None, None, "科目\nCourse"])
+    ws.append([])
+    ws.append([None, "(本表僅供教師原始成績紀錄，請妥善保留)"])
+    ws.append([])
+    ws.append([])
+    ws.append(["序號\nCode#", None, "學號 Stud#", None, "姓名  Name", "Nickname", "1", "2", "期中"])
+    ws.append([1, None, "90000001", None, "測試甲", "aa", 80])
+    ws.append([2, None, 90000002, None, "測試乙", None, 70])
+    ws.append([3, None, None, None, None])               # 空白列略過
+    ws.append([4, None, "90000003", None, "測試丙", "", None])
+    wb.create_sheet("TA說明").append(["工作表", "說明"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def test_import_school_gradebook_xlsx(client):
+    h = admin_headers(client)
+    r = client.post("/api/admin/students/import-xlsx", json={"data": school_gradebook_xlsx()}, headers=h)
+    assert r.status_code == 200 and r.json()["count"] == 3, r.text
+    students = {s["student_id"]: s for s in client.get("/api/admin/students", headers=h).json()}
+    assert set(students) == {"90000001", "90000002", "90000003"}
+    assert students["90000002"]["name"] == "測試乙" and students["90000002"]["class_name"] == ""
+    # 可統一指定班級
+    client.post("/api/admin/students/import-xlsx",
+                json={"data": school_gradebook_xlsx(), "class_name": "測試一甲"}, headers=h)
+    assert client.get("/api/admin/students", headers=h).json()[0]["class_name"] == "測試一甲"
+    assert client.post("/api/login", json={"student_id": "90000001"}).status_code == 200
+    bad = client.post("/api/admin/students/import-xlsx", json={"data": "bm90IGFuIHhsc3g="}, headers=h)
+    assert bad.status_code == 400
+
+
+def test_import_csv_with_chinese_headers(client):
+    h = admin_headers(client)
+    csv_text = "序號,學號,姓名\n1,90000011,測試丁\n2,90000012,測試戊\n"
+    assert client.post("/api/admin/students/import", json={"csv": csv_text}, headers=h).json()["count"] == 2
+    assert client.post("/api/admin/students/import", json={"csv": "a,b\n1,2\n"},
+                       headers=h).status_code == 400

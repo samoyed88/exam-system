@@ -62,8 +62,7 @@
     if (!sid) return;
     try {
       pending = await api('POST', '/api/login', { student_id: sid });
-      $('confirm-name').textContent = pending.student.name +
-        (pending.student.class_name ? '・' + pending.student.class_name + ' 班' : '');
+      $('confirm-name').textContent = pending.student.name;
       $('confirm').classList.remove('hidden');
       $('login-form').classList.add('hidden');
       $('confirm-yes').focus();

@@ -42,8 +42,6 @@
       <fieldset>
         <legend>一般</legend>
         <div class="field-row"><label for="e-title">考試名稱</label><input type="text" id="e-title" placeholder="例如 第一次段考"></div>
-        <div class="field-row"><label for="e-classes">適用班級</label>
-          <div><input type="text" id="e-classes" placeholder="701,702"><div class="hint">多個班級用逗號分隔；空白代表名單上所有學生都能考。</div></div></div>
         <div class="field-row"><label>學生是否看得到</label>
           <div><label class="check"><input type="checkbox" id="e-published"> 開放給學生（不勾選時學生清單看不到這場考試）</label></div></div>
       </fieldset>
@@ -180,14 +178,19 @@
 <section id="view-students" class="container wide hidden">
   <div class="toolbar">
     <h1>學生名單</h1>
-    <label class="btn ghost sm" style="margin:0;color:var(--text)">匯入 CSV<input type="file" id="s-file" accept=".csv" hidden></label>
-    <label class="check"><input type="checkbox" id="s-replace"> 匯入時清除舊名單（有作答紀錄的保留）</label>
-    <a class="muted" href="/samples/students.csv" download>下載範例 CSV</a>
+  </div>
+  <div class="card">
+    <div class="card-title">匯入名單</div>
+    <p class="muted">可以直接上傳學校的成績登記表（.xlsx）或 CSV，系統會自動找有「學號」「姓名」的表頭列，只讀這兩欄。
+      <a href="/samples/students.csv" download>下載範例 CSV</a></p>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="s-replace"> 清除舊名單（有作答紀錄的保留）</label>
+      <label class="btn" style="margin:0">選擇檔案匯入<input type="file" id="s-file" accept=".xlsx,.csv" hidden></label>
+    </div>
   </div>
   <div class="card row" style="margin-top:1rem">
     <input type="text" id="s-id" placeholder="學號" style="max-width:160px">
     <input type="text" id="s-name" placeholder="姓名" style="max-width:160px">
-    <input type="text" id="s-class" placeholder="班級" style="max-width:160px">
     <button class="btn sm" id="add-s">新增／更新</button>
   </div>
   <div class="msg" id="s-msg"></div>

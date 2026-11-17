@@ -80,18 +80,17 @@
     const exams = await call('GET', '/api/admin/exams');
     const WINDOW = { not_started: '<span class="badge gray">尚未開放</span>', open: '<span class="badge ok">開放中</span>', closed: '<span class="badge ng">已關閉</span>' };
     const when = t => t ? esc(t.replace('T', ' ')) : '';
-    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>班級</th><th>打散</th><th>已進場</th><th></th></tr>' +
+    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>打散</th><th>已進場</th><th></th></tr>' +
       exams.map(e => '<tr><td><b>' + esc(e.title) + '</b></td>' +
         '<td>' + (e.published ? WINDOW[e.window] : '<span class="badge gray">學生看不到</span>') + '</td>' +
         '<td>' + e.question_count + '</td><td>' + e.duration_min + ' 分鐘</td>' +
         '<td class="nowrap">' + (when(e.start_at) || '立即') + ' ～ ' + (when(e.end_at) || '不限') + '</td>' +
-        '<td>' + esc(e.class_names || '全部') + '</td>' +
         '<td class="nowrap">' + [e.shuffle_q ? '題目' : '', e.shuffle_opt ? '選項' : ''].filter(Boolean).join('、') + '</td>' +
         '<td>' + e.attempt_count + '</td>' +
         '<td class="row"><button class="btn sm" data-monitor="' + e.id + '">監控／成績</button>' +
         '<button class="btn ghost sm" data-edit="' + e.id + '">編輯</button>' +
         '<button class="btn danger sm" data-del="' + e.id + '">刪除</button></td></tr>').join('');
-    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="9" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
+    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="8" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
   }
 
   $('exam-table').addEventListener('click', async e => {
@@ -122,7 +121,6 @@
     $('e-start').value = e.start_at;
     $('e-end').value = e.end_at;
     syncTimeInputs();
-    $('e-classes').value = e.class_names;
     $('e-show').value = e.show_mode;
     $('e-review').value = e.review_when;
     $('e-review-at').value = e.review_at || '';
@@ -192,7 +190,7 @@
     const body = {
       title: $('e-title').value, duration_min: +$('e-duration').value,
       start_at: $('e-start-on').checked ? $('e-start').value : '',
-      end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: $('e-classes').value,
+      end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: '',
       show_mode: $('e-show').value, review_when: $('e-review').value, review_at: $('e-review-at').value,
       allow_review: $('e-allow-review').value !== 'no',
       review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
@@ -246,9 +244,9 @@
       '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
       '<div><b>' + avg + '</b><span>平均分</span></div>';
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
-    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>班級</th><th>狀態</th><th>進度</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
+    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
       data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
-        '<td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td><td>' + esc(r.class_name) + '</td>' +
+        '<td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
         '<td>' + status[r.status] + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
         '<td>' + (r.score != null ? r.score + ' / ' + r.max_score : '') + '</td>' +
         '<td>' + esc(r.ip || '') + '</td><td>' + esc(r.device || '') + '</td><td>' + (r.tab_switches || '') + '</td>' +
@@ -415,15 +413,15 @@
 
   async function loadStudents() {
     const list = await call('GET', '/api/admin/students');
-    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>班級</th><th></th></tr>' +
-      list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td><td>' + esc(s.class_name) + '</td>' +
+    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th></th></tr>' +
+      list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
         '<td><button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('');
     say('s-msg', '共 ' + list.length + ' 人', true);
   }
 
   $('add-s').addEventListener('click', async () => {
     try {
-      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value, class_name: $('s-class').value });
+      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value });
       $('s-id').value = $('s-name').value = '';
       loadStudents();
     } catch (err) { say('s-msg', err.message); }
@@ -437,9 +435,23 @@
     }
   });
 
+  function readBase64(input) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]);
+      reader.onerror = () => reject(new Error('讀檔失敗'));
+      reader.readAsDataURL(input.files[0]);
+    });
+  }
+
   $('s-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const opts = { replace: $('s-replace').checked };
     try {
-      const r = await call('POST', '/api/admin/students/import', { csv: await readFile(e.target), replace: $('s-replace').checked });
+      const r = /\.xlsx$/i.test(f.name)
+        ? await call('POST', '/api/admin/students/import-xlsx', Object.assign({ data: await readBase64(e.target) }, opts))
+        : await call('POST', '/api/admin/students/import', Object.assign({ csv: await readFile(e.target) }, opts));
       await loadStudents();
       say('s-msg', '匯入 ' + r.count + ' 人', true);
     } catch (err) { say('s-msg', err.message); }

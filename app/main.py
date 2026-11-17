@@ -22,6 +22,7 @@ from .auth import (
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
+from .roster import parse_csv, parse_xlsx
 
 TZ = ZoneInfo(os.getenv("TZ_NAME", "Asia/Taipei"))
 GRACE_SECONDS = 30  # 網路延遲寬限：時間到後 30 秒內送達的作答仍收
@@ -489,6 +490,13 @@ class AdminLoginIn(BaseModel):
 class CsvIn(BaseModel):
     csv: str
     replace: bool = False
+    class_name: str = ""   # 名單匯入：統一設定班級（選填）
+
+
+class XlsxIn(BaseModel):
+    data: str              # base64
+    replace: bool = False
+    class_name: str = ""
 
 
 class StudentIn(BaseModel):
@@ -566,28 +574,43 @@ def upsert_student(body: StudentIn, db=Depends(get_db)):
     return {"ok": True}
 
 
-@app.post("/api/admin/students/import", dependencies=[admin])
-def import_students(body: CsvIn, db=Depends(get_db)):
-    rows = read_csv(body.csv)
-    if rows and "student_id" not in rows[0]:
-        raise HTTPException(400, "CSV 第一列要有 student_id,name,class_name 標題")
+def save_roster(db, rows: list[tuple[str, str, str]], replace: bool, class_name: str) -> int:
+    if not rows:
+        raise HTTPException(400, "檔案裡沒有讀到任何學生")
     db.execute("BEGIN")
     try:
-        if body.replace:
+        if replace:
             db.execute("DELETE FROM students WHERE student_id NOT IN "
                        "(SELECT student_id FROM attempts)")
-        count = 0
-        for r in rows:
-            if r.get("student_id") and r.get("name"):
-                db.execute("INSERT INTO students VALUES (?, ?, ?) ON CONFLICT (student_id) "
-                           "DO UPDATE SET name = excluded.name, class_name = excluded.class_name",
-                           (r["student_id"], r["name"], r.get("class_name", "")))
-                count += 1
+        for sid, name, cls in rows:
+            db.execute("INSERT INTO students VALUES (?, ?, ?) ON CONFLICT (student_id) "
+                       "DO UPDATE SET name = excluded.name, class_name = excluded.class_name",
+                       (sid, name, class_name.strip() or cls))
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
         raise
-    return {"ok": True, "count": count}
+    return len(rows)
+
+
+@app.post("/api/admin/students/import", dependencies=[admin])
+def import_students(body: CsvIn, db=Depends(get_db)):
+    try:
+        rows = parse_csv(body.csv)
+    except ValueError as e:
+        raise HTTPException(400, f"{e}（CSV 第一列要有 學號、姓名，或 student_id、name）")
+    return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
+
+
+@app.post("/api/admin/students/import-xlsx", dependencies=[admin])
+def import_students_xlsx(body: XlsxIn, db=Depends(get_db)):
+    if len(body.data) > 14_000_000:
+        raise HTTPException(400, "檔案太大（上限約 10 MB）")
+    try:
+        rows = parse_xlsx(body.data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
 
 
 @app.delete("/api/admin/students/{student_id}", dependencies=[admin])
