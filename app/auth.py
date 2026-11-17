@@ -8,7 +8,11 @@ import time
 
 from fastapi import Header, HTTPException, Request
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me").encode()
+_secret = os.getenv("SECRET_KEY", "")
+# 程式碼是公開的，不能有預設金鑰，否則任何人都能偽造老師的 token
+if len(_secret) < 16 or _secret in ("replace-with-random-hex", "dev-secret-change-me"):
+    raise RuntimeError("請在 .env 設定 SECRET_KEY（至少 16 字元的隨機字串）")
+SECRET_KEY = _secret.encode()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 STUDENT_TTL = 6 * 3600
 ADMIN_TTL = 12 * 3600
