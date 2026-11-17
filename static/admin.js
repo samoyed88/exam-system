@@ -413,9 +413,11 @@
 
   async function loadStudents() {
     const list = await call('GET', '/api/admin/students');
-    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th></th></tr>' +
+    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>密碼</th><th></th></tr>' +
       list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
-        '<td><button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('');
+        '<td>' + (s.has_password ? '<span class="badge ok">已設定</span>' : '<span class="badge gray">未設定</span>') + '</td>' +
+        '<td class="row">' + (s.has_password ? '<button class="btn ghost sm" data-spw="' + esc(s.student_id) + '" data-name="' + esc(s.name) + '">重設密碼</button>' : '') +
+        '<button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('');
     say('s-msg', '共 ' + list.length + ' 人', true);
   }
 
@@ -428,6 +430,12 @@
   });
 
   $('s-table').addEventListener('click', async e => {
+    const reset = e.target.dataset.spw;
+    if (reset && confirm('清除「' + e.target.dataset.name + '」的密碼？清除後只輸入學號就能登入，學生可以再自己設定新密碼。')) {
+      try { await call('POST', '/api/admin/students/' + encodeURIComponent(reset) + '/reset-password'); loadStudents(); }
+      catch (err) { say('s-msg', err.message); }
+      return;
+    }
     const sid = e.target.dataset.sdel;
     if (sid && confirm('確定刪除學號 ' + sid + '？')) {
       try { await call('DELETE', '/api/admin/students/' + encodeURIComponent(sid)); loadStudents(); }

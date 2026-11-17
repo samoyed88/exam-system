@@ -9,7 +9,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS students (
     student_id TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
-    class_name TEXT NOT NULL DEFAULT ''
+    class_name TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL DEFAULT ''  -- 空 = 尚未設定密碼，只輸入學號即可登入
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -92,6 +93,7 @@ MIGRATIONS = [
     ("exams", "review_at", "TEXT NOT NULL DEFAULT ''"),
     ("exams", "allow_review", "INTEGER NOT NULL DEFAULT 1"),
     ("exams", "review_until", "TEXT NOT NULL DEFAULT ''"),
+    ("students", "password_hash", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

@@ -353,3 +353,45 @@ def test_import_csv_with_chinese_headers(client):
     assert client.post("/api/admin/students/import", json={"csv": csv_text}, headers=h).json()["count"] == 2
     assert client.post("/api/admin/students/import", json={"csv": "a,b\n1,2\n"},
                        headers=h).status_code == 400
+
+
+def test_student_password_flow(client):
+    from app import auth
+    auth._failures.clear()
+    h, _ = setup_exam(client)
+    # 一開始沒有密碼：只輸入學號就能登入
+    first = client.post("/api/login", json={"student_id": "11201"}).json()
+    assert first["student"]["has_password"] is False and "password_hash" not in first["student"]
+    s = {"Authorization": f"Bearer {first['token']}"}
+    assert client.post("/api/me/password", json={"new_password": "12"}, headers=s).status_code == 400
+    assert client.post("/api/me/password", json={"new_password": "abcd1234"}, headers=s).status_code == 200
+
+    # 設了密碼：沒給密碼時只回 need_password，不透露姓名
+    r = client.post("/api/login", json={"student_id": "11201"}).json()
+    assert r == {"need_password": True}
+    assert client.post("/api/login", json={"student_id": "11201", "password": "wrong"}).status_code == 401
+    ok = client.post("/api/login", json={"student_id": "11201", "password": "abcd1234"}).json()
+    assert ok["student"]["has_password"] is True
+
+    # 改密碼要舊密碼
+    s = {"Authorization": f"Bearer {ok['token']}"}
+    assert client.post("/api/me/password", json={"old_password": "x", "new_password": "zzzz"},
+                       headers=s).status_code == 400
+
+    # 連錯 5 次鎖定
+    for _ in range(4):
+        client.post("/api/login", json={"student_id": "11201", "password": "wrong"})
+    assert client.post("/api/login", json={"student_id": "11201", "password": "abcd1234"}).status_code == 429
+
+    # 老師重設後恢復只輸入學號
+    auth._failures.clear()
+    roster = {x["student_id"]: x for x in client.get("/api/admin/students", headers=h).json()}
+    assert roster["11201"]["has_password"] and "password_hash" not in roster["11201"]
+    assert client.post("/api/admin/students/11201/reset-password", headers=h).status_code == 200
+    assert "token" in client.post("/api/login", json={"student_id": "11201"}).json()
+    # 重新匯入名單不會清掉別人的密碼
+    s2 = student_headers(client, "11202")
+    client.post("/api/me/password", json={"new_password": "pppp"}, headers=s2)
+    client.post("/api/admin/students/import", headers=h,
+                json={"csv": (ROOT / "static/samples/students.csv").read_text()})
+    assert client.post("/api/login", json={"student_id": "11202"}).json() == {"need_password": True}

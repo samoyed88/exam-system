@@ -25,6 +25,7 @@
     $('who').innerHTML = student ? '<span class="avatar">' + esc(student.name.slice(-2)) + '</span> ' +
       esc(student.name) + '（' + esc(student.student_id) + '）' : '';
     $('logout').classList.toggle('hidden', !student || busy);
+    $('chpw').classList.toggle('hidden', !student || busy);
     if (view !== 'list') clearInterval(listTimer);
     window.scrollTo(0, 0);
   }
@@ -41,9 +42,23 @@
     store('exam_token', null); store('exam_student', null);
     clearInterval(timerId);
     $('sid').value = '';
+    resetLoginForm();
+    show('login');
+  }
+
+  function resetLoginForm() {
     $('confirm').classList.add('hidden');
     $('login-form').classList.remove('hidden');
-    show('login');
+    $('pw-row').classList.add('hidden');
+    $('spw').value = '';
+    $('sid').readOnly = false;
+    $('login-btn').textContent = '下一步';
+  }
+
+  function enter(data) {
+    token = data.token; student = data.student;
+    store('exam_token', token); store('exam_student', JSON.stringify(student));
+    loadList();
   }
 
   document.addEventListener('click', e => {
@@ -60,28 +75,74 @@
     $('login-msg').textContent = '';
     const sid = $('sid').value.trim();
     if (!sid) return;
+    const withPw = !$('pw-row').classList.contains('hidden');
     try {
-      pending = await api('POST', '/api/login', { student_id: sid });
+      pending = await api('POST', '/api/login', { student_id: sid, password: withPw ? $('spw').value : '' });
+      if (pending.need_password) {
+        $('pw-row').classList.remove('hidden');
+        $('sid').readOnly = true;
+        $('login-btn').textContent = '登入';
+        $('spw').focus();
+        return;
+      }
+      if (withPw) return enter(pending);   // 密碼已驗證，不用再確認姓名
       $('confirm-name').textContent = pending.student.name;
       $('confirm').classList.remove('hidden');
       $('login-form').classList.add('hidden');
       $('confirm-yes').focus();
     } catch (err) {
       $('login-msg').textContent = err.message;
+      if (withPw) { $('spw').value = ''; $('spw').focus(); }
     }
   });
-  $('confirm-yes').addEventListener('click', () => {
-    token = pending.token; student = pending.student;
-    store('exam_token', token); store('exam_student', JSON.stringify(student));
-    loadList();
+  $('sid').addEventListener('click', () => {
+    // 輸入密碼階段點學號欄 = 想換學號
+    if ($('sid').readOnly) { resetLoginForm(); $('login-msg').textContent = ''; }
   });
+  $('confirm-yes').addEventListener('click', () => enter(pending));
   $('confirm-no').addEventListener('click', () => {
     pending = null;
-    $('confirm').classList.add('hidden');
-    $('login-form').classList.remove('hidden');
+    resetLoginForm();
     $('sid').value = '';
     $('sid').focus();
   });
+
+  // ── 密碼 ──
+
+  function renderPwBanner() {
+    $('pw-banner').innerHTML = student && !student.has_password
+      ? '<div class="alert warn row" style="justify-content:space-between">' +
+        '<span>你還沒設定密碼，知道你學號的人都能用你的身分登入。</span>' +
+        '<button class="btn sm" data-setpw>設定密碼</button></div>'
+      : '';
+  }
+
+  async function changePassword() {
+    const has = student.has_password;
+    const ok = await ask(has ? '修改密碼' : '設定密碼',
+      (has ? '<label for="pw-old">目前的密碼</label><input type="password" id="pw-old" autocomplete="current-password">' : '') +
+      '<label for="pw-new">新密碼（4 個字元以上）</label><input type="password" id="pw-new" autocomplete="new-password">' +
+      '<label for="pw-new2">再輸入一次新密碼</label><input type="password" id="pw-new2" autocomplete="new-password">' +
+      '<p class="hint" style="margin-top:.75rem">設定後登入要輸入學號和密碼。忘記密碼請找老師重設。</p>',
+      '儲存', '取消');
+    if (!ok) return;
+    const oldPw = has ? $('pw-old').value : '';
+    const pw = $('pw-new').value, pw2 = $('pw-new2').value;
+    let msg;
+    if (pw !== pw2) msg = '兩次輸入的新密碼不一樣。';
+    else {
+      try {
+        await call('POST', '/api/me/password', { old_password: oldPw, new_password: pw });
+        student.has_password = true;
+        store('exam_student', JSON.stringify(student));
+        renderPwBanner();
+        msg = '密碼已設定，下次登入請輸入學號和密碼。';
+      } catch (err) { msg = err.message; }
+    }
+    await ask(has ? '修改密碼' : '設定密碼', '<p>' + esc(msg) + '</p>', '確定', null);
+  }
+  $('chpw').addEventListener('click', changePassword);
+  document.addEventListener('click', e => { if (e.target.closest('[data-setpw]')) changePassword(); });
   $('logout').addEventListener('click', logout);
 
   // ── 考試清單 ──
@@ -91,6 +152,7 @@
 
   async function loadList() {
     show('list');
+    renderPwBanner();
     $('list-msg').textContent = '';
     const box = $('exam-list');
     box.innerHTML = '<p class="muted">載入中…</p>';

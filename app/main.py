@@ -17,8 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .auth import (
-    ADMIN_TTL, STUDENT_TTL, check_admin_password, client_ip, current_student,
-    ip_allowed, make_token, require_admin,
+    ADMIN_TTL, STUDENT_TTL, check_admin_password, client_ip, current_student, hash_password,
+    ip_allowed, login_locked, make_token, record_failure, require_admin, verify_password,
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
@@ -195,6 +195,17 @@ def exam_window(exam: sqlite3.Row) -> str:
 
 class LoginIn(BaseModel):
     student_id: str
+    password: str = ""
+
+
+class PasswordIn(BaseModel):
+    old_password: str = ""
+    new_password: str
+
+
+def public_student(s: sqlite3.Row) -> dict:
+    return {"student_id": s["student_id"], "name": s["name"], "class_name": s["class_name"],
+            "has_password": bool(s["password_hash"])}
 
 
 class StartIn(BaseModel):
@@ -221,7 +232,29 @@ def login(body: LoginIn, db=Depends(get_db)):
     student = db.execute("SELECT * FROM students WHERE student_id = ?", (sid,)).fetchone()
     if not student:
         raise HTTPException(404, "名單裡沒有這個學號，請再確認一次")
-    return {"token": make_token("s", sid, STUDENT_TTL), "student": dict(student)}
+    if student["password_hash"]:
+        # 設了密碼的帳號，密碼對之前不透露姓名
+        if not body.password:
+            return {"need_password": True}
+        if login_locked(sid):
+            raise HTTPException(429, "密碼錯誤次數太多，請 5 分鐘後再試，或請老師重設密碼")
+        if not verify_password(body.password, student["password_hash"]):
+            record_failure(sid)
+            raise HTTPException(401, "密碼錯誤")
+    return {"token": make_token("s", sid, STUDENT_TTL), "student": public_student(student)}
+
+
+@app.post("/api/me/password")
+def change_password(body: PasswordIn, sid: str = Depends(current_student), db=Depends(get_db)):
+    student = load_student(db, sid)
+    if student["password_hash"] and not verify_password(body.old_password,
+                                                         student["password_hash"]):
+        raise HTTPException(400, "原本的密碼不正確")
+    if len(body.new_password) < 4 or len(body.new_password) > 64:
+        raise HTTPException(400, "新密碼長度要 4 到 64 個字元")
+    db.execute("UPDATE students SET password_hash = ? WHERE student_id = ?",
+               (hash_password(body.new_password), sid))
+    return {"ok": True}
 
 
 def load_student(db, sid: str) -> sqlite3.Row:
@@ -560,7 +593,7 @@ def read_csv(text: str) -> list[dict]:
 
 @app.get("/api/admin/students", dependencies=[admin])
 def list_students(db=Depends(get_db)):
-    return [dict(r) for r in db.execute(
+    return [public_student(r) for r in db.execute(
         "SELECT * FROM students ORDER BY class_name, student_id")]
 
 
@@ -568,7 +601,8 @@ def list_students(db=Depends(get_db)):
 def upsert_student(body: StudentIn, db=Depends(get_db)):
     if not body.student_id.strip() or not body.name.strip():
         raise HTTPException(400, "學號與姓名必填")
-    db.execute("INSERT INTO students VALUES (?, ?, ?) ON CONFLICT (student_id) DO UPDATE SET "
+    db.execute("INSERT INTO students (student_id, name, class_name) VALUES (?, ?, ?) "
+               "ON CONFLICT (student_id) DO UPDATE SET "
                "name = excluded.name, class_name = excluded.class_name",
                (body.student_id.strip(), body.name.strip(), body.class_name.strip()))
     return {"ok": True}
@@ -583,7 +617,8 @@ def save_roster(db, rows: list[tuple[str, str, str]], replace: bool, class_name:
             db.execute("DELETE FROM students WHERE student_id NOT IN "
                        "(SELECT student_id FROM attempts)")
         for sid, name, cls in rows:
-            db.execute("INSERT INTO students VALUES (?, ?, ?) ON CONFLICT (student_id) "
+            db.execute("INSERT INTO students (student_id, name, class_name) VALUES (?, ?, ?) "
+                       "ON CONFLICT (student_id) "
                        "DO UPDATE SET name = excluded.name, class_name = excluded.class_name",
                        (sid, name, class_name.strip() or cls))
         db.execute("COMMIT")
@@ -611,6 +646,12 @@ def import_students_xlsx(body: XlsxIn, db=Depends(get_db)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
+
+
+@app.post("/api/admin/students/{student_id}/reset-password", dependencies=[admin])
+def reset_student_password(student_id: str, db=Depends(get_db)):
+    db.execute("UPDATE students SET password_hash = '' WHERE student_id = ?", (student_id,))
+    return {"ok": True}
 
 
 @app.delete("/api/admin/students/{student_id}", dependencies=[admin])
