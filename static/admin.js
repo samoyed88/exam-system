@@ -112,7 +112,7 @@
     editingExam = id;
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
-      review_when: 'immediate', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
+      review_when: 'immediate', review_at: '', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
     };
     $('exam-form-title').textContent = id ? '編輯考試' : '新增考試';
     $('e-title').value = e.title;
@@ -125,6 +125,8 @@
     $('e-classes').value = e.class_names;
     $('e-show').value = e.show_mode;
     $('e-review').value = e.review_when;
+    $('e-review-at').value = e.review_at || '';
+    syncReview();
     $('e-shuffle-q').value = e.shuffle_q ? '1' : '0';
     $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
     $('e-published').checked = !!e.published;
@@ -141,6 +143,10 @@
     $('e-start').disabled = !$('e-start-on').checked;
     $('e-end').disabled = !$('e-end-on').checked;
   }
+  function syncReview() {
+    $('e-review-at-wrap').classList.toggle('hidden', $('e-review').value !== 'at_time');
+  }
+  $('e-review').addEventListener('change', syncReview);
   $('e-start-on').addEventListener('change', syncTimeInputs);
   $('e-end-on').addEventListener('change', syncTimeInputs);
 
@@ -183,7 +189,7 @@
       title: $('e-title').value, duration_min: +$('e-duration').value,
       start_at: $('e-start-on').checked ? $('e-start').value : '',
       end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: $('e-classes').value,
-      show_mode: $('e-show').value, review_when: $('e-review').value,
+      show_mode: $('e-show').value, review_when: $('e-review').value, review_at: $('e-review-at').value,
       shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
     };

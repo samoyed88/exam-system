@@ -157,8 +157,18 @@ def regrade(db, attempt_id: int) -> None:
                (round(total, 2), round(sum(q["points"] for q in qs.values()), 2), attempt_id))
 
 
+def release_time(exam: sqlite3.Row) -> datetime | None:
+    """成績公布時間；None 代表交卷後立即。"""
+    if exam["review_when"] == "after_close":
+        return parse_time(exam["end_at"])
+    if exam["review_when"] == "at_time":
+        return parse_time(exam["review_at"])
+    return None
+
+
 def review_ready(exam: sqlite3.Row) -> bool:
-    return exam["review_when"] != "after_close" or exam_window(exam) == "closed"
+    release = release_time(exam)
+    return release is None or now() >= release
 
 
 def exam_window(exam: sqlite3.Row) -> str:
@@ -235,6 +245,7 @@ def student_exams(sid: str = Depends(current_student), db=Depends(get_db)):
             "question_count": n, "start_at": start.isoformat() if start else "",
             "end_at": end.isoformat() if end else "", "window": exam_window(exam),
             "review_when": exam["review_when"],
+            "release_at": release_time(exam).isoformat() if release_time(exam) else "",
             "attempt": None if not attempt else {
                 "id": attempt["id"], "submitted": bool(attempt["submitted_at"])},
         })
@@ -397,9 +408,9 @@ def result_payload(db, attempt: sqlite3.Row) -> dict:
            "show_mode": exam["show_mode"], "started_at": attempt["started_at"],
            "submitted_at": attempt["submitted_at"], "questions": []}
     if not review_ready(exam):
-        end = parse_time(exam["end_at"])
+        release = release_time(exam)
         out.update(score=None, max_score=None, pending=True,
-                   release_at=end.isoformat() if end else "")
+                   release_at=release.isoformat() if release else "")
         return out
     if exam["show_mode"] == "score":
         return out
@@ -490,6 +501,7 @@ class ExamIn(BaseModel):
     shuffle_opt: bool = True
     show_mode: str = "score"
     review_when: str = "immediate"
+    review_at: str = ""
     allowed_ips: str = ""
     published: bool = False
     question_ids: list[int] = []
@@ -681,19 +693,22 @@ def exam_values(e: ExamIn) -> tuple:
         raise HTTPException(400, "交卷後顯示方式不正確")
     if e.duration_min < 1:
         raise HTTPException(400, "限時至少 1 分鐘")
-    if e.review_when not in ("immediate", "after_close"):
+    if e.review_when not in ("immediate", "after_close", "at_time"):
         raise HTTPException(400, "成績公布時間不正確")
     try:
         start, end = parse_time(e.start_at), parse_time(e.end_at)
+        review_at = parse_time(e.review_at)
     except ValueError:
         raise HTTPException(400, "時間格式不正確")
     if start and end and end <= start:
         raise HTTPException(400, "關閉時間要晚於開放時間")
     if e.review_when == "after_close" and not end:
         raise HTTPException(400, "選「考試關閉後公布成績」時，要設定關閉時間")
+    if e.review_when == "at_time" and not review_at:
+        raise HTTPException(400, "選「指定時間公布成績」時，要設定公布時間")
     return (e.title.strip(), e.start_at, e.end_at, e.duration_min, e.class_names,
             int(e.shuffle_q), int(e.shuffle_opt), e.show_mode, e.allowed_ips, int(e.published),
-            e.review_when)
+            e.review_when, e.review_at if e.review_when == "at_time" else "")
 
 
 def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
@@ -709,7 +724,7 @@ def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
 
 
 EXAM_COLS = ("title, start_at, end_at, duration_min, class_names, shuffle_q, shuffle_opt, "
-             "show_mode, allowed_ips, published, review_when")
+             "show_mode, allowed_ips, published, review_when, review_at")
 
 
 @app.get("/api/admin/exams", dependencies=[admin])
@@ -733,7 +748,7 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     values = exam_values(body)
     db.execute("BEGIN")
     try:
-        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          values)
         set_exam_questions(db, cur.lastrowid, body.question_ids)
         db.execute("COMMIT")

@@ -79,8 +79,13 @@
             <option value="explain">總分 + 每題對錯、正確答案與解析</option>
           </select></div></div>
         <div class="field-row"><label for="e-review">什麼時候公布</label>
-          <div><select id="e-review"><option value="immediate">交卷後立即</option><option value="after_close">考試關閉後（需設定關閉時間）</option></select>
-          <div class="hint">選「考試關閉後」可避免先考完的學生把答案傳給還在考的人。</div></div></div>
+          <div><select id="e-review">
+            <option value="immediate">交卷後立即</option>
+            <option value="after_close">考試關閉後（需設定關閉時間）</option>
+            <option value="at_time">指定時間</option>
+          </select>
+          <div class="inline hidden" id="e-review-at-wrap" style="margin-top:.5rem"><span>公布時間</span><input type="datetime-local" id="e-review-at"></div>
+          <div class="hint">選「考試關閉後」或「指定時間」可避免先考完的學生把答案傳給還在考的人；公布前學生只看得到「已交卷」。</div></div></div>
       </fieldset>
 
       <fieldset>

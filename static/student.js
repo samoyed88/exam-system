@@ -110,7 +110,9 @@
 
   function examStatus(ex) {
     const now = serverNow();
-    if (ex.attempt && ex.attempt.submitted) return 'submitted';
+    if (ex.attempt && ex.attempt.submitted) {
+      return ex.release_at && now < Date.parse(ex.release_at) ? 'submitted_wait' : 'submitted';
+    }
     if (ex.attempt) return 'in_progress';
     if (ex.start_at && now < Date.parse(ex.start_at)) return 'not_started';
     if (ex.end_at && now > Date.parse(ex.end_at)) return 'closed';
@@ -124,8 +126,9 @@
     if (st === 'open' && ex.end_at) return '關閉前還有 <b class="countdown">' + fmtSpan((Date.parse(ex.end_at) - now) / 1000) + '</b> 可以進場';
     if (st === 'in_progress') return '你已經開始作答，計時仍在進行，請盡快繼續。';
     if (st === 'closed') return '考試已關閉，你沒有作答紀錄。';
-    if (st === 'submitted' && ex.review_when === 'after_close' && ex.end_at && now < Date.parse(ex.end_at)) {
-      return '已交卷，成績將於 ' + fmtDateTime(ex.end_at) + ' 公布。';
+    if (st === 'submitted_wait') {
+      return '已交卷，成績將於 ' + fmtDateTime(ex.release_at) + ' 公布（還有 <b class="countdown">' +
+        fmtSpan((Date.parse(ex.release_at) - now) / 1000) + '</b>）。';
     }
     if (st === 'submitted') return '已交卷，可以查看成績。';
     return '';
@@ -140,6 +143,7 @@
     const BADGE = {
       not_started: '<span class="badge gray">尚未開放</span>', open: '<span class="badge ok">開放中</span>',
       in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge">已交卷</span>',
+      submitted_wait: '<span class="badge">已交卷・待公布</span>',
       closed: '<span class="badge ng">已關閉</span>',
     };
     box.innerHTML = exams.map(ex => {
@@ -148,6 +152,7 @@
       if (st === 'open') action = '<button class="btn" data-start="' + ex.id + '">開始作答</button>';
       if (st === 'in_progress') action = '<button class="btn" data-start="' + ex.id + '">繼續作答</button>';
       if (st === 'submitted') action = '<button class="btn ghost" data-result="' + ex.attempt.id + '">查看成績</button>';
+      if (st === 'submitted_wait') action = '<button class="btn ghost" data-result="' + ex.attempt.id + '">查看交卷紀錄</button>';
       return '<div class="card exam-card"><div class="exam-icon">📝</div><div class="body">' +
         '<div class="row"><h2>' + esc(ex.title) + '</h2>' + BADGE[st] + '</div>' +
         '<div class="exam-meta">' +

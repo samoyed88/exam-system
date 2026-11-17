@@ -7,7 +7,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["ADMIN_PASSWORD"] = "teacher"
-os.environ["SECRET_KEY"] = "test-secret"
+os.environ["SECRET_KEY"] = "test-secret-0123456789"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -255,3 +255,25 @@ def test_review_uses_same_shuffled_option_letters(client):
     rq = next(q for q in result["questions"] if q["type"] == "single")
     assert rq["options"] == [o["text"] for o in single["options"]]
     assert rq["response"] == shown.index(0) and rq["answer"] == [shown.index(0)]
+
+
+def test_review_at_fixed_time(client):
+    h, _ = setup_exam(client)
+    s = student_headers(client, "11201")
+    assert client.post("/api/admin/exams", headers=h, json={
+        "title": "x", "question_ids": [1], "review_when": "at_time"}).status_code == 400
+    eid = client.post("/api/admin/exams", headers=h, json={
+        "title": "定時公布", "published": True, "question_ids": [1], "show_mode": "answers",
+        "review_when": "at_time", "review_at": "2999-01-01T12:00"}).json()["id"]
+    aid = client.post(f"/api/exams/{eid}/start", json={}, headers=s).json()["attempt_id"]
+    client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": 0}, headers=s)
+    r = client.post(f"/api/attempts/{aid}/submit", headers=s).json()
+    assert r["pending"] and r["score"] is None and r["release_at"].startswith("2999-01-01T12:00")
+    ex = next(e for e in client.get("/api/exams", headers=s).json()["exams"] if e["id"] == eid)
+    assert ex["release_at"].startswith("2999-01-01T12:00")
+    # 公布時間改到過去 → 立刻看得到
+    body = {"title": "定時公布", "published": True, "question_ids": [1], "show_mode": "answers",
+            "review_when": "at_time", "review_at": "2000-01-01T12:00"}
+    assert client.put(f"/api/admin/exams/{eid}", json=body, headers=h).status_code == 200
+    r = client.get(f"/api/attempts/{aid}/result", headers=s).json()
+    assert r["score"] == 2 and len(r["questions"]) == 1
