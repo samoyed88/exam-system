@@ -24,7 +24,7 @@ set -a; source .env; set +a
 ```bash
 git clone <repo> exam && cd exam   # 之後更新用 git pull
 cp .env.example .env               # 填 ADMIN_PASSWORD、SECRET_KEY、IP_HEADER 等
-docker compose up -d --build       # 只開 app，http://localhost:8000
+docker compose up -d --build       # 只開 app，http://localhost:8000（.env 的 APP_PORT 可改）
 ```
 
 對外公開二選一：
