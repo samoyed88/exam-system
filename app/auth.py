@@ -53,6 +53,36 @@ def require_admin(authorization: str = Header("")) -> None:
     read_token(_bearer(authorization), "a")
 
 
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        _, salt, digest = stored.split("$")
+        got = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=2**14, r=8, p=1)
+    except ValueError:
+        return False
+    return hmac.compare_digest(got.hex(), digest)
+
+
+# 簡單的猜密碼防護：同一學號 5 分鐘內錯 5 次就先鎖 5 分鐘（各 worker 各自計算）
+_failures: dict[str, list[float]] = {}
+MAX_FAILURES, LOCK_SECONDS = 5, 300
+
+
+def login_locked(sid: str) -> bool:
+    recent = [t for t in _failures.get(sid, []) if time.time() - t < LOCK_SECONDS]
+    _failures[sid] = recent
+    return len(recent) >= MAX_FAILURES
+
+
+def record_failure(sid: str) -> None:
+    _failures.setdefault(sid, []).append(time.time())
+
+
 def check_admin_password(password: str) -> bool:
     if not ADMIN_PASSWORD:
         raise HTTPException(500, "伺服器尚未設定 ADMIN_PASSWORD")
