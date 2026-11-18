@@ -44,7 +44,7 @@ cloudflared tunnel route dns exam-system exam.你的網域
 cloudflared tunnel token exam-system     # 輸出貼到 .env 的 TUNNEL_TOKEN
 ```
 
-若 `~/.cloudflared/config.yml` 裡已有別的 `tunnel:`，`route dns` 會被它蓋過而綁錯 tunnel，要加 `--config /dev/null` 並改用 tunnel UUID。
+若 `~/.cloudflared/config.yml` 裡已有別的 `tunnel:`，`route dns` 會被它蓋過而綁錯 tunnel，要另建一個只寫 `tunnel: <UUID>` 的設定檔，用 `--config` 指定它（`/dev/null` 會被拒絕）。
 
 更新版本：
 
