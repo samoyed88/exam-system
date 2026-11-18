@@ -36,6 +36,16 @@ docker compose up -d --build       # 只開 app，http://localhost:8000
 
 Cloudflare Tunnel：在 Cloudflare Zero Trust 建一個 tunnel，Public Hostname 設 `exam.你的網域` → Service `http://app:8000`，把 token 貼到 `.env`。
 
+也可以用 CLI 建（不用進 Dashboard，compose 已用 `TUNNEL_URL` 指到 `app:8000`）：
+
+```bash
+cloudflared tunnel create exam-system
+cloudflared tunnel route dns exam-system exam.你的網域
+cloudflared tunnel token exam-system     # 輸出貼到 .env 的 TUNNEL_TOKEN
+```
+
+若 `~/.cloudflared/config.yml` 裡已有別的 `tunnel:`，`route dns` 會被它蓋過而綁錯 tunnel，要加 `--config /dev/null` 並改用 tunnel UUID。
+
 更新版本：
 
 ```bash

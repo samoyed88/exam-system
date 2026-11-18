@@ -19,6 +19,8 @@ services:
     command: tunnel --no-autoupdate run
     environment:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+      # 用 CLI 建的 tunnel（沒有在 Dashboard 設 Public Hostname）時，直接把流量送到 app
+      - TUNNEL_URL=http://app:8000
     depends_on:
       - app
 
