@@ -53,10 +53,20 @@ git pull
 docker compose --profile tunnel up -d --build   # 依你用的 profile
 ```
 
-備份（考前考後各一次，平常每日）：
+備份（考前考後各一次，平常每日）。要在容器裡做，不要從主機直接開 `data/exam.db`（Docker Desktop 的掛載資料夾不支援跨系統共用 SQLite 鎖）：
 
 ```bash
-sqlite3 data/exam.db ".backup data/backup-$(date +%Y%m%d-%H%M).db"
+docker compose exec app python -c "import sqlite3,time; sqlite3.connect('/app/data/exam.db').backup(sqlite3.connect(time.strftime('/app/data/backup-%Y%m%d-%H%M.db')))"
+```
+
+壓力測試（考前確認主機撐得住；會建立測試學生與考試，請對另開的測試容器執行，不要打正式站）：
+
+```bash
+docker build -t exam-loadtest . && docker run -d --rm --name exam-loadtest -p 127.0.0.1:8013:8000 \
+  -e ADMIN_PASSWORD=loadtest -e SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") exam-loadtest
+.venv/bin/python scripts/loadtest.py --url http://127.0.0.1:8013 --password loadtest \
+  --students 100 --questions static/samples/questions.csv          # 加 --auto-submit 測時間到代交
+docker stop exam-loadtest
 ```
 
 ## IP 設定很重要
