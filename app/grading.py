@@ -10,9 +10,17 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).casefold()
 
 
+# 只認一般小數與分數。Fraction 也吃 1e999999999 這種指數寫法，展開要算好幾小時，
+# 交卷評分時又握著資料庫寫入鎖，一個學生就能讓全場卡住
+NUMBER = re.compile(r"[-+]?(\d{1,30}(\.\d{0,30})?|\.\d{1,30})(/\d{1,30})?")
+
+
 def as_number(text: str):
+    text = text.replace(" ", "")
+    if not NUMBER.fullmatch(text):
+        return None
     try:
-        return Fraction(text.replace(" ", ""))
+        return Fraction(text)
     except (ValueError, ZeroDivisionError):
         return None
 

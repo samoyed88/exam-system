@@ -6,7 +6,9 @@ import ipaddress
 import os
 import time
 
-from fastapi import Header, HTTPException, Request
+from fastapi import Depends, Header, HTTPException, Request
+
+from .db import get_db
 
 _secret = os.getenv("SECRET_KEY", "")
 # 程式碼是公開的，不能有預設金鑰，否則任何人都能偽造老師的 token
@@ -28,13 +30,15 @@ def read_token(token: str, role: str) -> str:
     try:
         raw = base64.urlsafe_b64decode(token.encode()).decode()
         payload, sig = raw.rsplit(":", 1)
-        tok_role, subject, exp = payload.split(":", 2)
+        tok_role, rest = payload.split(":", 1)
+        subject, exp = rest.rsplit(":", 1)  # 學號裡有冒號也不會拆錯
+        exp = int(exp)
     except Exception:
         raise HTTPException(401, "登入資訊無效，請重新登入")
     good = hmac.new(SECRET_KEY, payload.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, good) or tok_role != role:
+    if not hmac.compare_digest(sig.encode(), good.encode()) or tok_role != role:
         raise HTTPException(401, "登入資訊無效，請重新登入")
-    if int(exp) < time.time():
+    if exp < time.time():
         raise HTTPException(401, "登入已過期，請重新登入")
     return subject
 
@@ -45,12 +49,33 @@ def _bearer(authorization: str) -> str:
     return authorization[7:]
 
 
-def current_student(authorization: str = Header("")) -> str:
-    return read_token(_bearer(authorization), "s")
+def password_version(password_hash: str) -> str:
+    # 放進 token：學生改密碼或老師重設後，舊 token（例如被別人拿去的）立即失效
+    return hashlib.sha256(password_hash.encode()).hexdigest()[:12] if password_hash else "-"
+
+
+def student_token(sid: str, password_hash: str) -> str:
+    return make_token("s", f"{sid}|{password_version(password_hash)}", STUDENT_TTL)
+
+
+def current_student(authorization: str = Header(""), db=Depends(get_db)) -> str:
+    sid, _, version = read_token(_bearer(authorization), "s").rpartition("|")
+    row = db.execute("SELECT password_hash FROM students WHERE student_id = ?", (sid,)).fetchone()
+    if not row:
+        raise HTTPException(401, "名單裡已沒有這個學號，請找老師")
+    if password_version(row["password_hash"]) != version:
+        raise HTTPException(401, "密碼已變更，請重新登入")
+    return sid
+
+
+def admin_subject() -> str:
+    # 換掉 ADMIN_PASSWORD 後，舊的老師 token 一併失效
+    return hmac.new(SECRET_KEY, b"admin:" + ADMIN_PASSWORD.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 def require_admin(authorization: str = Header("")) -> None:
-    read_token(_bearer(authorization), "a")
+    if read_token(_bearer(authorization), "a") != admin_subject():
+        raise HTTPException(401, "登入資訊無效，請重新登入")
 
 
 def hash_password(password: str) -> str:
@@ -68,19 +93,23 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(got.hex(), digest)
 
 
-# 簡單的猜密碼防護：同一學號 5 分鐘內錯 5 次就先鎖 5 分鐘（各 worker 各自計算）
+# 簡單的猜密碼防護：同一個 key 在時間窗內失敗太多次就先擋住。
+# key 由呼叫端組合，例如「IP|學號」：只鎖住從那個 IP 來猜的人，校外的人沒辦法故意把學生鎖在門外
 _failures: dict[str, list[float]] = {}
 MAX_FAILURES, LOCK_SECONDS = 5, 300
 
 
-def login_locked(sid: str) -> bool:
-    recent = [t for t in _failures.get(sid, []) if time.time() - t < LOCK_SECONDS]
-    _failures[sid] = recent
-    return len(recent) >= MAX_FAILURES
+def login_locked(key: str, limit: int = MAX_FAILURES, window: int = LOCK_SECONDS) -> bool:
+    recent = [t for t in _failures.get(key, []) if time.time() - t < window]
+    if recent:
+        _failures[key] = recent
+    else:
+        _failures.pop(key, None)
+    return len(recent) >= limit
 
 
-def record_failure(sid: str) -> None:
-    _failures.setdefault(sid, []).append(time.time())
+def record_failure(key: str) -> None:
+    _failures.setdefault(key, []).append(time.time())
 
 
 def check_admin_password(password: str) -> bool:
