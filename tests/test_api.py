@@ -395,3 +395,33 @@ def test_student_password_flow(client):
     client.post("/api/admin/students/import", headers=h,
                 json={"csv": (ROOT / "static/samples/students.csv").read_text()})
     assert client.post("/api/login", json={"student_id": "11202"}).json() == {"need_password": True}
+
+
+def test_score_stats(client):
+    h, exam_id = setup_exam(client)
+    for sid, single in (("11201", 0), ("11202", 1)):
+        s = student_headers(client, sid)
+        aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+        client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": single}, headers=s)
+        client.post(f"/api/attempts/{aid}/submit", headers=s)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert data["max_score"] == 8
+    assert [(r["student_id"], r["score"], r["rank"]) for r in data["rows"]] == [("11201", 2, 1), ("11202", 0, 2)]
+    sm = data["summary"]
+    assert (sm["count"], sm["absent"], sm["mean"], sm["median"], sm["min"], sm["max"]) == (2, 1, 1, 1, 0, 2)
+    assert (sm["q1"], sm["q3"]) == (0.5, 1.5)
+    # 第 1 題一人對一人錯 → 50%；其他題沒人作答 → 0
+    assert [q["rate"] for q in data["questions"]] == [0.5, 0, 0]
+
+
+def test_score_stats_ties_and_empty(client):
+    h, exam_id = setup_exam(client)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert data["rows"] == [] and data["summary"]["count"] == 0 and "mean" not in data["summary"]
+    assert all(q["rate"] is None for q in data["questions"])
+    for sid in ("11201", "11202"):
+        s = student_headers(client, sid)
+        aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+        client.post(f"/api/attempts/{aid}/submit", headers=s)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert [r["rank"] for r in data["rows"]] == [1, 1]

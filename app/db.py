@@ -1,4 +1,4 @@
-"""SQLite 連線與資料表。每個請求開一條連線；WAL 讓 100 人同時讀寫不互卡。"""
+"""SQLite 連線與資料表。每個請求開一條連線；WAL 讓 100 人同時讀寫不互卡（限單一行程，見 Dockerfile）。"""
 import os
 import sqlite3
 from pathlib import Path

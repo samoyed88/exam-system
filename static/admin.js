@@ -1,7 +1,7 @@
 /* 老師後台：考試設定、考場監控、各題分析、題庫、名單 */
 (function () {
   'use strict';
-  const { store, api, esc, LETTERS } = window.exam;
+  const { store, api, esc, fmtTime, LETTERS } = window.exam;
   const $ = id => document.getElementById(id);
 
   let token = store('exam_admin_token');
@@ -26,12 +26,12 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'stats', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'questions', 'students'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
     if (view !== 'monitor') clearInterval(monitorTimer);
-    const tab = { monitor: 'exams', stats: 'exams' }[view] || view;
+    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   }
 
@@ -269,12 +269,251 @@
   });
   document.querySelectorAll('[data-back]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); openTab('exams'); }));
 
+  // ── 成績統計 ──
+
+  const SVG = 'http://www.w3.org/2000/svg';
+  let scores = null;
+  const sc = { unit: 'raw', bin: 10, pass: null, mode: 'all', a: null, b: null };
+
+  $('mon-scores').addEventListener('click', loadScores);
+  $('scores-refresh').addEventListener('click', loadScores);
+  $('scores-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+
+  async function loadScores() {
+    show('scores');
+    scores = await call('GET', '/api/admin/exams/' + monitorExam + '/scores');
+    $('scores-title').textContent = scores.exam.title + '：成績統計';
+    if (sc.pass == null || sc.exam !== monitorExam) {
+      sc.exam = monitorExam;
+      sc.unit = 'raw';
+      sc.pass = round1(scaleMax() * 0.6);
+      sc.mode = 'all';
+      sc.cut = null;
+    }
+    $('sc-unit').value = sc.unit;
+    $('sc-pass').value = sc.pass;
+    renderScores();
+  }
+
+  const round1 = x => Math.round(x * 10) / 10;
+  const scaleMax = () => sc.unit === 'pct' ? 100 : scores.max_score;
+  const value = r => sc.unit === 'pct' ? (scores.max_score ? r.score / scores.max_score * 100 : 0) : r.score;
+  const fmtNum = x => x == null ? '-' : String(round1(x));
+
+  function renderScores() {
+    const s = scores.summary;
+    const conv = x => x == null ? null : (sc.unit === 'pct' && scores.max_score ? x / scores.max_score * 100 : x);
+    const passed = scores.rows.filter(r => value(r) >= sc.pass).length;
+    $('sc-summary').innerHTML = [
+      [s.count, '已交卷' + (s.in_progress || s.absent ? '（作答中 ' + s.in_progress + '、未進場 ' + s.absent + '）' : '')],
+      [fmtNum(conv(s.mean)), '平均'], [fmtNum(conv(s.median)), '中位數'], [fmtNum(conv(s.sd)), '標準差'],
+      [fmtNum(conv(s.max)) + ' / ' + fmtNum(conv(s.min)), '最高 / 最低'],
+      [fmtNum(conv(s.q1)) + ' / ' + fmtNum(conv(s.q3)), 'Q1 / Q3'],
+      [s.count ? Math.round(passed / s.count * 100) + '%' : '-', '及格率（' + passed + ' 人）'],
+    ].map(([v, t]) => '<div><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+    renderHistogram();
+    renderScoreTable();
+    renderQuestionChart();
+  }
+
+  function bins() {
+    const max = scaleMax(), w = sc.bin;
+    const n = Math.max(1, Math.ceil(max / w));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push({ a: i * w, b: Math.min((i + 1) * w, max), last: i === n - 1, rows: [] });
+    scores.rows.forEach(r => {
+      const i = Math.min(n - 1, Math.max(0, Math.floor(value(r) / w)));
+      out[i].rows.push(r);
+    });
+    return out;
+  }
+
+  function el(tag, attrs, parent) {
+    const node = document.createElementNS(SVG, tag);
+    for (const k in attrs) node.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(node);
+    return node;
+  }
+
+  // 上方圓角 4px、底部貼齊基線的長條
+  function barPath(x, y, w, h) {
+    const r = Math.min(4, w / 2, h);
+    return 'M' + x + ',' + (y + h) + 'V' + (y + r) + 'Q' + x + ',' + y + ' ' + (x + r) + ',' + y +
+      'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z';
+  }
+
+  function niceStep(max, ticks) {
+    const raw = max / ticks, p = Math.pow(10, Math.floor(Math.log10(raw)));
+    return [1, 2, 5, 10].map(m => m * p).find(s => s >= raw);
+  }
+
+  function frame(box, W, H, m, yMax, yStep, yFmt) {
+    box.innerHTML = '';
+    const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img' }, box);
+    for (let v = 0; v <= yMax + 1e-9; v += yStep) {
+      const y = m.t + (H - m.t - m.b) * (1 - v / yMax);
+      el('line', { x1: m.l, x2: W - m.r, y1: y, y2: y, class: v === 0 ? 'axis' : 'grid' }, svg);
+      el('text', { x: m.l - 6, y: y + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = yFmt(v);
+    }
+    return svg;
+  }
+
+  function tip(e, html) {
+    const t = $('sc-tip');
+    if (!html) { t.classList.add('hidden'); return; }
+    t.innerHTML = html;
+    t.classList.remove('hidden');
+    const x = Math.min(e.clientX + 14, window.innerWidth - t.offsetWidth - 8);
+    t.style.left = x + 'px';
+    t.style.top = (e.clientY + 14) + 'px';
+  }
+
+  function renderHistogram() {
+    tip(null, null);
+    const box = $('sc-hist');
+    const bs = bins();
+    const W = 760, H = 260, m = { t: 12, r: 12, b: 34, l: 40 };
+    const top = Math.max(1, ...bs.map(b => b.rows.length));
+    const step = Math.max(1, niceStep(top, 4));
+    const yMax = Math.ceil(top / step) * step;
+    const svg = frame(box, W, H, m, yMax, step, v => v);
+    const pw = W - m.l - m.r, ph = H - m.t - m.b, max = scaleMax();
+    const x = v => m.l + pw * v / max;
+    bs.forEach(b => {
+      const x0 = x(b.a) + 1, x1 = x(b.b) - 1, h = ph * b.rows.length / yMax;
+      const below = b.last ? b.b < sc.pass : b.b <= sc.pass;
+      const selected = sc.mode === 'range' && sc.a === b.a && sc.b === b.b;
+      if (b.rows.length) el('path', { d: barPath(x0, m.t + ph - h, Math.max(1, x1 - x0), h), class: 'mark' + (below ? ' ng' : '') + (selected ? ' sel' : '') }, svg);
+      if (b.rows.length) el('text', { x: (x0 + x1) / 2, y: m.t + ph - h - 4, class: 'val', 'text-anchor': 'middle' }, svg).textContent = b.rows.length;
+      el('text', { x: (x0 + x1) / 2, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = fmtNum(b.a) + '–' + fmtNum(b.b);
+      const hit = el('rect', { x: x(b.a), y: m.t, width: x(b.b) - x(b.a), height: ph, class: 'hit' }, svg);
+      const range = fmtNum(b.a) + ' ≤ 分數 ' + (b.last ? '≤ ' : '< ') + fmtNum(b.b);
+      hit.addEventListener('mousemove', e => tip(e, '<b>' + b.rows.length + ' 人</b><br>' + range + (b.rows.length ? '<br><span class="muted">點一下列出名單</span>' : '')));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+      hit.addEventListener('click', () => {
+        Object.assign(sc, { mode: 'range', a: b.a, b: b.b, last: b.last });
+        renderHistogram();
+        renderScoreTable();
+        $('sc-table').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    });
+    if (sc.pass > 0 && sc.pass <= max) {
+      const px = x(sc.pass);
+      el('line', { x1: px, x2: px, y1: m.t, y2: m.t + ph, class: 'pass' }, svg);
+      el('text', { x: px + 4, y: m.t + 10, class: 'tick pass-label' }, svg).textContent = '及格 ' + fmtNum(sc.pass);
+    }
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent =
+      sc.unit === 'pct' ? '百分制分數' : '分數（滿分 ' + fmtNum(max) + '）';
+  }
+
+  function filtered() {
+    return scores.rows.filter(r => {
+      const v = value(r);
+      if (sc.mode === 'below') return v < sc.cut;
+      if (sc.mode === 'atleast') return v >= sc.cut;
+      if (sc.mode === 'range') return v >= sc.a && (sc.last ? v <= sc.b : v < sc.b);
+      return true;
+    });
+  }
+
+  function renderScoreTable() {
+    $('sc-mode').value = sc.mode;
+    $('sc-mode').querySelector('[value=range]').textContent = sc.mode === 'range' ? '區間 ' + fmtNum(sc.a) + '–' + fmtNum(sc.b) : '區間';
+    $('sc-cut').classList.toggle('hidden', sc.mode === 'all' || sc.mode === 'range');
+    if (sc.cut == null) sc.cut = sc.pass;
+    $('sc-cut').value = sc.cut;
+    const rows = filtered();
+    $('sc-count').textContent = rows.length + ' / ' + scores.rows.length + ' 人';
+    const pct = r => scores.max_score ? round1(r.score / scores.max_score * 100) : 0;
+    $('sc-table').innerHTML = '<tr><th style="width:70px">名次</th><th>學號</th><th>姓名</th><th>分數</th><th>百分制</th><th>交卷時間</th></tr>' +
+      (rows.map(r => '<tr><td>' + r.rank + '</td><td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
+        '<td class="' + (value(r) < sc.pass ? 'score-ng' : '') + '">' + fmtNum(r.score) + ' / ' + fmtNum(scores.max_score) + '</td>' +
+        '<td>' + pct(r) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td></tr>').join('') ||
+        '<tr><td colspan="6" class="muted">沒有符合的學生</td></tr>');
+  }
+
+  function renderQuestionChart() {
+    tip(null, null);
+    const box = $('sc-qchart');
+    const qs = scores.questions;
+    if (!qs.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
+    const W = 760, H = 220, m = { t: 12, r: 12, b: 30, l: 40 };
+    const svg = frame(box, W, H, m, 100, 25, v => v + '%');
+    const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
+    const gap = Math.min(2, slot * .2);
+    const every = Math.ceil(qs.length / 25);
+    qs.forEach((q, i) => {
+      const x0 = m.l + slot * i + gap, w = Math.max(1, slot - gap * 2);
+      const rate = q.rate || 0, h = ph * rate;
+      if (q.rate != null && h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' }, svg);
+      const last = i === qs.length - 1;
+      if (last || (i % every === 0 && qs.length - 1 - i >= every / 2))
+        el('text', { x: x0 + w / 2, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = i + 1;
+      const hit = el('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
+      const stem = q.stem.length > 60 ? q.stem.slice(0, 60) + '…' : q.stem;
+      hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + (i + 1) + ' 題　' + (q.rate == null ? '-' : Math.round(q.rate * 100) + '%') + '</b>' +
+        '<span class="muted">（' + TYPE_TEXT[q.type] + '・' + q.points + ' 分）</span><br>' + esc(stem)));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+      hit.addEventListener('click', e => { tip(e, null); loadStats(q.id); });
+    });
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（依考卷順序）';
+  }
+
+  $('sc-unit').addEventListener('change', () => {
+    const toPct = $('sc-unit').value === 'pct';
+    const f = scores.max_score ? (toPct ? 100 / scores.max_score : scores.max_score / 100) : 1;
+    sc.unit = $('sc-unit').value;
+    sc.pass = round1(sc.pass * f);
+    if (sc.cut != null) sc.cut = round1(sc.cut * f);
+    if (sc.mode === 'range') sc.mode = 'all';
+    $('sc-pass').value = sc.pass;
+    renderScores();
+  });
+  $('sc-bin').addEventListener('change', () => {
+    sc.bin = +$('sc-bin').value;
+    if (sc.mode === 'range') sc.mode = 'all';
+    renderHistogram();
+    renderScoreTable();
+  });
+  $('sc-pass').addEventListener('input', () => {
+    const v = parseFloat($('sc-pass').value);
+    if (isNaN(v)) return;
+    sc.pass = v;
+    renderScores();
+  });
+  $('sc-mode').addEventListener('change', () => {
+    sc.mode = $('sc-mode').value;
+    renderHistogram();
+    renderScoreTable();
+  });
+  $('sc-cut').addEventListener('input', () => {
+    const v = parseFloat($('sc-cut').value);
+    if (isNaN(v)) return;
+    sc.cut = v;
+    renderScoreTable();
+  });
+  $('sc-copy').addEventListener('click', async () => {
+    const rows = filtered();
+    const text = '學號\t姓名\t分數\n' + rows.map(r => r.student_id + '\t' + r.name + '\t' + r.score).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    say('sc-msg', '已複製 ' + rows.length + ' 人（可直接貼到 Excel）', true);
+  });
+
   // ── 各題分析 ──
 
-  $('mon-stats').addEventListener('click', loadStats);
+  $('mon-stats').addEventListener('click', () => loadStats());
   $('stats-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
 
-  async function loadStats() {
+  async function loadStats(focusId) {
     show('stats');
     $('stats-title').textContent = $('mon-title').textContent + '：各題分析';
     const stats = await call('GET', '/api/admin/exams/' + monitorExam + '/stats');
@@ -293,10 +532,12 @@
           LETTERS[i] + '. ' + esc(o) + '</td><td><div class="bar-track"><div class="bar' + (q.answer.includes(i) ? ' right' : '') +
           '" style="width:' + (q.option_counts[i] / max * 100) + '%"></div></div></td><td style="width:5rem">' + q.option_counts[i] + ' 人</td></tr>').join('') + '</table>';
       }
-      return '<div class="card"><div class="q-head"><span class="q-num">' + (n + 1) + '.</span><span class="badge">' + TYPE_TEXT[q.type] + '</span>' +
+      return '<div class="card" id="stat-q' + q.id + '"><div class="q-head"><span class="q-num">' + (n + 1) + '.</span><span class="badge">' + TYPE_TEXT[q.type] + '</span>' +
         '<span class="muted">滿分率 ' + rate + '（' + q.full_marks + ' / ' + q.submitted + '）</span></div>' +
         '<div class="q-stem">' + esc(q.stem) + '</div>' + (q.code ? '<pre>' + esc(q.code) + '</pre>' : '') + detail + '</div>';
     }).join('') || '<p class="muted">這場考試沒有題目。</p>';
+    const target = typeof focusId === 'number' && $('stat-q' + focusId);
+    if (target) target.scrollIntoView({ block: 'start' });
   }
 
   $('stats-body').addEventListener('click', async e => {

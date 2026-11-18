@@ -6,6 +6,7 @@ import json
 import os
 import random
 import sqlite3
+import statistics
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -984,6 +985,52 @@ def exam_stats(exam_id: int, db=Depends(get_db)):
             item["option_counts"] = counts
         out.append(item)
     return out
+
+
+def quantile(sorted_vals: list[float], p: float) -> float:
+    # 線性內插，與 Excel 的 PERCENTILE.INC 相同
+    k = (len(sorted_vals) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
+@app.get("/api/admin/exams/{exam_id}/scores", dependencies=[admin])
+def exam_scores(exam_id: int, db=Depends(get_db)):
+    data = monitor(exam_id, db)
+    qs = exam_questions(db, exam_id)
+    max_score = sum(q["points"] for q in qs)
+    done = sorted((r for r in data["rows"] if r["status"] == "submitted"),
+                  key=lambda r: -r["score"])
+    rows = []
+    for r in done:
+        # 同分同名次
+        rank = rows[-1]["rank"] if rows and rows[-1]["score"] == r["score"] else len(rows) + 1
+        rows.append({"student_id": r["student_id"], "name": r["name"], "score": r["score"],
+                     "rank": rank, "submitted_at": r["submitted_at"]})
+    vals = sorted(r["score"] for r in rows)
+    summary = {"count": len(vals),
+               "absent": sum(1 for r in data["rows"] if r["status"] == "absent"),
+               "in_progress": sum(1 for r in data["rows"] if r["status"] == "in_progress")}
+    if vals:
+        summary.update({
+            "mean": round(statistics.fmean(vals), 2),
+            "median": round(statistics.median(vals), 2),
+            "sd": round(statistics.pstdev(vals), 2),
+            "min": vals[0], "max": vals[-1],
+            "q1": round(quantile(vals, .25), 2), "q3": round(quantile(vals, .75), 2)})
+    # 各題得分率：已交卷者在這題的平均得分 / 配分，沒作答算 0 分
+    earned = {r["question_id"]: r["total"] for r in db.execute(
+        "SELECT ans.question_id, SUM(ans.score) AS total FROM answers ans "
+        "JOIN attempts a ON a.id = ans.attempt_id "
+        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL GROUP BY ans.question_id",
+        (exam_id,))}
+    questions = [{"id": q["id"], "type": q["type"], "stem": q["stem"], "points": q["points"],
+                  "rate": round((earned.get(q["id"]) or 0) / (q["points"] * len(vals)), 3)
+                  if vals and q["points"] else None}
+                 for q in qs]
+    return {"exam": {"id": exam_id, "title": data["exam"]["title"]}, "max_score": max_score,
+            "summary": summary, "rows": rows, "questions": questions}
 
 
 @app.post("/api/admin/questions/{qid}/accept-fill", dependencies=[admin])
