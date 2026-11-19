@@ -153,6 +153,8 @@
     <button class="btn ghost sm" id="mon-scores">成績統計</button>
     <button class="btn ghost sm" id="mon-stats">各題分析</button>
     <button class="btn ghost sm" id="mon-seats">座位分析</button>
+    <button class="btn ghost sm" id="mon-items">試題分析</button>
+    <button class="btn sm" id="mon-grades">成績總表／匯出</button>
   </div>
   <div class="summary" id="mon-summary"></div>
   <div class="table-wrap"><table id="mon-table"></table></div>
@@ -203,6 +205,63 @@
     </div>
     <div class="chart" id="sc-qchart"></div>
   </div>
+</section>
+
+<!-- 試題分析 -->
+<section id="view-items" class="container wide hidden">
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="items-back">考場監控</a> / 試題分析</div>
+  <div class="toolbar">
+    <h1 id="items-title"></h1>
+    <a class="btn ghost sm" id="items-csv" href="#">下載 CSV</a>
+  </div>
+  <div class="summary" id="items-summary"></div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">試題位置的統計報告</div>
+      <div class="chart-legend" style="margin:0"><span><i class="sw"></i>答對率</span><span><i class="sw part"></i>鑑別效率</span><span class="muted">點長條看該題的選項分布</span></div>
+    </div>
+    <div class="chart" id="items-chart"></div>
+  </div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">測驗結構分析</div>
+      <span class="muted">紅底：鑑別指數為負，請檢查題目與答案；黃底：鑑別度偏低、太難或太簡單</span>
+    </div>
+    <div class="table-wrap"><table id="items-table"></table></div>
+    <details class="explain"><summary>各欄位怎麼看</summary>
+      <dl>
+        <dt>答對率</dt><dd>這題平均得分 ÷ 配分。一般 30%～80% 較能區分程度。</dd>
+        <dt>標準差</dt><dd>這題得分的分散程度 ÷ 配分。</dd>
+        <dt>隨機猜測分數</dt><dd>完全用猜的期望得分：單選為 1／選項數，多選為隨機勾選任意組合的平均，填充為 0。答對率接近或低於這個值，代表多數人是用猜的。</dd>
+        <dt>預期權重／有效權重</dt><dd>預期：配分占總分的比例；有效：這題實際影響總分排序的比例。兩者差很多，代表這題的分數幾乎每個人都一樣（有效權重低）或特別拉開差距（有效權重高）。</dd>
+        <dt>鑑別指數</dt><dd>這題得分和其餘題目總分的相關係數。≥ 30% 良好、20%～30% 尚可、&lt; 20% 偏低；負值代表程度好的學生反而答錯，常見原因是答案設錯或題意不清。</dd>
+        <dt>鑑別效率</dt><dd>在這題的難度下，鑑別指數最多能到多少，實際達到了幾成。太難或太簡單的題目鑑別指數天生就低，看這一欄比較公平。</dd>
+        <dt>信度 α</dt><dd>整份測驗的內部一致性（Cronbach's α），越接近 1 表示各題測到的能力越一致；題數少的小考通常偏低。</dd>
+      </dl>
+    </details>
+  </div>
+</section>
+
+<!-- 成績總表 -->
+<section id="view-grades" class="container wide hidden">
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="grades-back">考場監控</a> / 成績總表</div>
+  <div class="toolbar">
+    <h1 id="grades-title"></h1>
+    <label class="inline-field">顯示<select id="grades-mode"><option value="score">每題得分</option><option value="response">作答內容</option></select></label>
+    <label class="inline-field">排序<select id="grades-sort"><option value="id">學號</option><option value="high">成績高 → 低</option><option value="low">成績低 → 高</option></select></label>
+    <button class="btn sm" id="grades-xlsx">匯出 Excel</button>
+  </div>
+  <div class="card" id="grades-order-card">
+    <div class="chart-head">
+      <div class="muted" id="grades-order"></div>
+      <div class="row">
+        <label class="btn ghost sm" style="margin:0">上傳成績總表<input type="file" id="grades-order-file" accept=".xlsx,.csv" hidden></label>
+        <button class="btn ghost sm hidden" id="grades-order-clear">改回依學號</button>
+      </div>
+    </div>
+    <div class="msg" id="grades-msg"></div>
+  </div>
+  <div class="table-wrap scroll-table grades-wrap"><table id="grades-table"></table></div>
 </section>
 
 <!-- 座位分析 -->

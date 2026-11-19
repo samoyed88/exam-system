@@ -934,3 +934,76 @@ def test_weighted_question_and_exam_points(client):
     assert next(x for x in client.get("/api/admin/questions", headers=h).json() if x["id"] == qid)["points"] == 2
     got.update(question_points={"1": 0})
     assert client.put(f"/api/admin/exams/{eid}", json=got, headers=h).status_code == 400
+
+
+# ── 試題分析、成績總表、匯出 Excel ──
+
+def take(client, exam_id, sid, picks):
+    """picks：題目 id → 作答。"""
+    s = student_headers(client, sid)
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    for qid, resp in picks.items():
+        client.put(f"/api/attempts/{aid}/answers", json={"question_id": qid, "response": resp}, headers=s)
+    client.post(f"/api/attempts/{aid}/submit", headers=s)
+    return aid
+
+
+def test_item_analysis_gradebook_and_csv(client):
+    h, exam_id = setup_exam(client, shuffle_opt=False)
+    qs = {q["id"]: q for q in client.get("/api/admin/questions", headers=h).json()}
+    single = next(q for q in qs.values() if q["type"] == "single")
+    right, wrong = single["answer"][0], (single["answer"][0] + 1) % len(single["options"])
+    take(client, exam_id, "11201", {single["id"]: right})
+    take(client, exam_id, "11202", {single["id"]: right})
+    take(client, exam_id, "11203", {single["id"]: wrong})
+    d = client.get(f"/api/admin/exams/{exam_id}/items", headers=h).json()
+    item = next(i for i in d["items"] if i["id"] == single["id"])
+    assert d["count"] == 3 and item["count"] == 3
+    assert item["facility"] == pytest.approx(2 / 3)
+    assert item["guess"] == pytest.approx(1 / len(single["options"]))
+    assert sum(i["intended"] for i in d["items"]) == pytest.approx(1)
+    csv_text = client.get(f"/api/admin/exams/{exam_id}/items.csv", headers=h).text
+    assert "答對率" in csv_text and "66.67%" in csv_text
+    g = client.get(f"/api/admin/exams/{exam_id}/gradebook", headers=h).json()
+    assert [r["student_id"] for r in g["rows"]] == ["11201", "11202", "11203"]
+    pos = [q["id"] for q in g["questions"]].index(single["id"])
+    assert [r["cells"][pos]["state"] for r in g["rows"]] == ["right", "right", "wrong"]
+    assert g["rows"][0]["cells"][pos]["response"].startswith("ABCDEF"[right] + ". ")
+    assert all(r["cells"][(pos + 1) % 3]["state"] == "blank" for r in g["rows"])
+
+
+def test_grade_export_follows_gradebook_order(client):
+    import base64
+    import io
+    import openpyxl
+    h, exam_id = setup_exam(client)
+    client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=h)
+    for sid in ("11201", "11202", "11203"):
+        client.post("/api/admin/students", json={"student_id": sid, "name": "生" + sid[-1], "class_name": "資管一乙"}, headers=h)
+    client.post("/api/admin/students", json={"student_id": "10999", "name": "不在總表", "class_name": "資管一乙"}, headers=h)
+    exam = client.get(f"/api/admin/exams/{exam_id}", headers=h).json()
+    exam.update(class_names="資管一乙", question_points={"1": 24})
+    client.put(f"/api/admin/exams/{exam_id}", json=exam, headers=h)
+    take(client, exam_id, "11203", {})
+    take(client, exam_id, "10999", {})
+    # 助教總表：第 7 列表頭、第 8 列起學生，順序刻意不是學號排序
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sheet"
+    ws.append([])
+    ws["A7"], ws["C7"], ws["E7"] = "序號\nCode#", "學號 Stud#", "姓名  Name"
+    for n, sid in enumerate(["11203", "11201", "11202"], start=8):
+        ws.cell(n, 1, n - 7), ws.cell(n, 3, sid), ws.cell(n, 5, "生" + sid[-1])
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = client.post("/api/admin/classes/資管一乙/grade-order",
+                    json={"data": base64.b64encode(buf.getvalue()).decode(), "filename": "總表.xlsx"}, headers=h).json()
+    assert r["count"] == 3 and r["extra"] == [{"student_id": "10999", "name": "不在總表"}]
+    x = client.get(f"/api/admin/exams/{exam_id}/grades.xlsx", headers=h)
+    assert x.status_code == 200 and "spreadsheetml" in x.headers["content-type"]
+    out = openpyxl.load_workbook(io.BytesIO(x.content)).active
+    assert [out.cell(r, 3).value for r in range(8, 11)] == ["11203", "11201", "11202"]
+    assert out.cell(8, 6).value == 0 and out.cell(9, 6).value is None   # 11203 交卷 0 分、11201 沒考留空
+    assert out.cell(7, 6).value.startswith("成績/")
+    assert "不在成績總表上" in out.cell(12, 1).value and out.cell(13, 3).value == "10999"
+    assert client.delete("/api/admin/classes/資管一乙/grade-order", headers=h).json()["count"] == 0

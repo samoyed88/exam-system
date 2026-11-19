@@ -29,6 +29,8 @@ from .auth import (
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
+from .analysis import flags as item_flags
+from .analysis import item_analysis, item_name, random_guess
 from .roster import parse_csv, parse_xlsx
 from .seating import (
     RELATION_TEXT, Analyzer, clean_sheet, neighbor_pairs, normalize, parse_seat_map, sheet_rows_from_file,
@@ -1688,6 +1690,225 @@ def compare_students(exam_id: int, a: str, b: str, db=Depends(get_db)):
             side.pop("norm")
         out.append(item)
     return {"a": person(rows[a]), "b": person(rows[b]), "questions": out}
+
+
+# ── 試題分析、成績總表、匯出 ──
+
+
+def submitted_scores(db, exam_id: int) -> tuple[list[sqlite3.Row], dict[int, dict[int, sqlite3.Row]]]:
+    """已交卷的作答（依學號）與每份作答的各題答案列。"""
+    attempts = db.execute(
+        "SELECT a.*, s.name, s.class_name FROM attempts a LEFT JOIN students s ON s.student_id = a.student_id "
+        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL ORDER BY a.student_id", (exam_id,)).fetchall()
+    answers: dict[int, dict[int, sqlite3.Row]] = {a["id"]: {} for a in attempts}
+    for r in db.execute("SELECT ans.* FROM answers ans JOIN attempts a ON a.id = ans.attempt_id "
+                        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL", (exam_id,)):
+        answers[r["attempt_id"]][r["question_id"]] = r
+    return attempts, answers
+
+
+@app.get("/api/admin/exams/{exam_id}/items", dependencies=[admin])
+def exam_items(exam_id: int, db=Depends(get_db)):
+    exam = exam_or_404(db, exam_id)
+    qs = exam_questions(db, exam_id)
+    attempts, answers = submitted_scores(db, exam_id)
+    items = []
+    for q in qs:
+        n_opts = len(json.loads(q["options"]))
+        items.append({"id": q["id"], "points": q["points"],
+                      "guess": random_guess(q["type"], n_opts, lambda resp, q=q: score_answer(q, resp) / (q["points"] or 1))})
+    result = item_analysis(items, [{qid: r["score"] for qid, r in answers[a["id"]].items()} for a in attempts])
+    by_id = {q["id"]: q for q in qs}
+    rows = []
+    for no, row in enumerate(result["items"], start=1):
+        q = by_id[row["id"]]
+        rows.append({**row, "no": no, "type": q["type"], "name": item_name(q["tags"], q["stem"]),
+                     "stem": q["stem"], "points": q["points"], "flags": item_flags(row)})
+    totals = [a["score"] for a in attempts]
+    return {"exam": {"id": exam_id, "title": exam["title"]}, "count": result["count"], "alpha": result["alpha"],
+            "mean": statistics.fmean(totals) if totals else None,
+            "max_score": sum(q["points"] for q in qs), "items": rows}
+
+
+def pct(v) -> str:
+    return "" if v is None else f"{v * 100:.2f}%"
+
+
+@app.get("/api/admin/exams/{exam_id}/items.csv", dependencies=[admin])
+def exam_items_csv(exam_id: int, db=Depends(get_db)):
+    data = exam_items(exam_id, db)
+    buf = io.StringIO()
+    buf.write("\ufeff")
+    w = csv.writer(buf)
+    w.writerow(["題號", "題型", "概念名稱/能力指標", "配分", "作答記錄", "答對率", "標準差", "隨機猜測分數",
+                "預期權重", "有效權重", "鑑別指數", "鑑別效率", "需要檢查"])
+    type_text = {"single": "單選", "multi": "多選", "fill": "填充"}
+    for r in data["items"]:
+        w.writerow([r["no"], type_text[r["type"]], csv_text(r["name"]), r["points"], r["count"], pct(r["facility"]),
+                    pct(r["sd"]), pct(r["guess"]), pct(r["intended"]), pct(r["effective"]),
+                    pct(r["discrimination"]), pct(r["efficiency"]), "；".join(r["flags"])])
+    return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-items.csv"'})
+
+
+def answer_state(q: sqlite3.Row, a: sqlite3.Row | None) -> str:
+    if not a or json.loads(a["response"]) in (None, []):
+        return "blank"
+    score = a["score"] or 0
+    return "right" if score >= q["points"] - 1e-9 else "partial" if score > 0 else "wrong"
+
+
+def response_detail(q: sqlite3.Row, response) -> str:
+    """成績總表「作答內容」用：選擇題附上選項文字，例如 B. int i[];"""
+    if q["type"] == "fill" or response in (None, []):
+        return response_text(q, response)
+    options = json.loads(q["options"])
+    picks = response if isinstance(response, list) else [response]
+    return "；".join(f"{LETTERS[i]}. {options[i]}" for i in picks if 0 <= i < len(options))
+
+
+@app.get("/api/admin/exams/{exam_id}/gradebook", dependencies=[admin])
+def exam_gradebook(exam_id: int, db=Depends(get_db)):
+    """仿 Moodle 成績表：每位交卷學生、每題得分與對錯，以及作答內容。"""
+    exam = exam_or_404(db, exam_id)
+    qs = exam_questions(db, exam_id)
+    attempts, answers = submitted_scores(db, exam_id)
+    rows = []
+    for a in attempts:
+        cells = []
+        for q in qs:
+            r = answers[a["id"]].get(q["id"])
+            resp = json.loads(r["response"]) if r else None
+            cells.append({"score": r["score"] if r else None, "state": answer_state(q, r),
+                          "response": response_detail(q, resp)})
+        rows.append({"attempt_id": a["id"], "student_id": a["student_id"], "name": a["name"] or "",
+                     "class_name": a["class_name"] or "", "started_at": a["started_at"],
+                     "submitted_at": a["submitted_at"], "seconds": used_seconds(dict(a)),
+                     "score": a["score"], "cells": cells})
+    owner = seat_owner(db, exam)
+    return {"exam": {"id": exam_id, "title": exam["title"]},
+            "questions": [{"no": n + 1, "id": q["id"], "type": q["type"], "points": q["points"],
+                           "name": item_name(q["tags"], q["stem"])} for n, q in enumerate(qs)],
+            "max_score": sum(q["points"] for q in qs), "rows": rows,
+            "owner": owner, "grade_order": grade_order_view(db, owner) if owner else None}
+
+
+class GradeOrderIn(BaseModel):
+    data: str              # base64
+    filename: str
+
+
+@app.post("/api/admin/classes/{name}/grade-order", dependencies=[admin])
+def set_grade_order(name: str, body: GradeOrderIn, db=Depends(get_db)):
+    """上傳助教的成績總表，記住學生順序；之後匯出 Excel 照這個順序，整欄貼回總表就對得上。"""
+    class_or_404(db, name)
+    try:
+        if body.filename.lower().endswith(".csv"):
+            rows = parse_csv(base64.b64decode(body.data).decode("utf-8-sig", errors="replace"))
+        else:
+            rows = parse_xlsx(body.data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    order = [sid for sid, _, _ in rows]
+    db.execute("UPDATE classes SET grade_order = ? WHERE name = ?", (json.dumps(order), name))
+    return grade_order_view(db, name)
+
+
+@app.delete("/api/admin/classes/{name}/grade-order", dependencies=[admin])
+def clear_grade_order(name: str, db=Depends(get_db)):
+    class_or_404(db, name)
+    db.execute("UPDATE classes SET grade_order = '' WHERE name = ?", (name,))
+    return grade_order_view(db, name)
+
+
+@app.get("/api/admin/classes/{name}/grade-order", dependencies=[admin])
+def get_grade_order(name: str, db=Depends(get_db)):
+    return grade_order_view(db, name)
+
+
+def grade_order_view(db, name: str) -> dict:
+    c = class_or_404(db, name)
+    order = json.loads(c["grade_order"] or "[]")
+    roster = {r["student_id"]: r["name"] for r in db.execute(
+        "SELECT student_id, name FROM students WHERE class_name = ?", (name,))}
+    return {"name": name, "count": len(order),
+            "missing": [sid for sid in order if sid not in roster],          # 總表上有、名單沒有
+            "extra": [{"student_id": s, "name": n} for s, n in sorted(roster.items()) if s not in order]}
+
+
+@app.get("/api/admin/exams/{exam_id}/grades.xlsx", dependencies=[admin])
+def export_grades_xlsx(exam_id: int, db=Depends(get_db)):
+    """成績匯出成助教總表的格式：A 序號、C 學號、E 姓名、F 成績，第 8 列開始；學生順序照班級的成績總表。"""
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    exam = exam_or_404(db, exam_id)
+    qs = exam_questions(db, exam_id)
+    max_score = sum(q["points"] for q in qs)
+    attempts, answers = submitted_scores(db, exam_id)
+    by_sid = {a["student_id"]: a for a in attempts}
+    owner = seat_owner(db, exam)
+    order = json.loads(db.execute("SELECT grade_order FROM classes WHERE name = ?", (owner,)).fetchone()[0] or "[]") if owner else []
+    roster = {r["student_id"]: r for r in exam_roster(db, exam)}
+    names = {r["student_id"]: r["name"] for r in db.execute("SELECT student_id, name FROM students")}
+    main = order or sorted(roster)
+    extra = sorted((set(roster) | set(by_sid)) - set(main))
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "成績"
+    thin = Side(style="thin", color="999999")
+    box = Border(left=thin, right=thin, top=thin, bottom=thin)
+    head = PatternFill("solid", fgColor="E7ECF2")
+    ws["B2"], ws["D2"] = "班級\nClass", owner or "、".join(class_list(exam["class_names"])) or "不限"
+    ws["H2"], ws["J2"] = "考試\nExam", exam["title"]
+    ws["B4"] = f"匯出時間 {datetime.now(TZ):%Y-%m-%d %H:%M}；滿分 {max_score:g}；學生順序：" + \
+        ("依班級成績總表" if order else "依學號（尚未上傳成績總表）")
+    ws["B5"] = "F 欄可整欄複製貼到成績總表同一列範圍；未交卷留空白。"
+    headers = {1: "序號\nCode#", 3: "學號 Stud#", 5: "姓名  Name", 6: f"成績/{max_score:g}", 7: "百分制"}
+    for n, q in enumerate(qs):
+        headers[8 + n] = f"Q{n + 1}/{q['points']:g}\n{item_name(q['tags'], q['stem'])}"
+    for col, text in headers.items():
+        c = ws.cell(7, col, text)
+        c.font, c.fill, c.border = Font(bold=True), head, box
+        c.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+    ws.row_dimensions[7].height = 44
+
+    def write(row: int, seq, sid: str):
+        a = by_sid.get(sid)
+        values = {1: seq, 3: sid, 5: names.get(sid, "")}
+        if a:
+            values[6] = a["score"]
+            values[7] = round(a["score"] / max_score * 100, 2) if max_score else None
+            for n, q in enumerate(qs):
+                r = answers[a["id"]].get(q["id"])
+                values[8 + n] = r["score"] if r and r["score"] is not None else 0
+        for col in range(1, 8 + len(qs)):
+            c = ws.cell(row, col, values.get(col))
+            c.border = box
+            if col == 3:
+                c.number_format = "@"  # 學號維持文字，前面的 0 不會不見
+
+    row = 8
+    for seq, sid in enumerate(main, start=1):
+        write(row, seq, sid)
+        row += 1
+    if extra:
+        row += 1
+        ws.cell(row, 1, "以下學生不在成績總表上（貼回總表時請另外處理）").font = Font(bold=True, color="B0301C")
+        row += 1
+        for sid in extra:
+            write(row, "", sid)
+            row += 1
+    for col, width in {1: 7, 2: 2, 3: 12, 4: 2, 5: 10, 6: 10, 7: 8}.items():
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+    for n in range(len(qs)):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(8 + n)].width = 12
+    ws.freeze_panes = "F8"
+    buf = io.BytesIO()
+    wb.save(buf)
+    filename = f"exam-{exam_id}-grades.xlsx"
+    return Response(buf.getvalue(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.post("/api/admin/questions/{qid}/accept-fill", dependencies=[admin])

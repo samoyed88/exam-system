@@ -34,12 +34,12 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
     if (view !== 'monitor') clearInterval(monitorTimer);
-    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams' }[view] || view;
+    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   }
 
@@ -607,14 +607,14 @@
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
   };
 
-  $('attempt-back').addEventListener('click', () => attemptFrom === 'scores' ? loadScores() : openMonitor(monitorExam));
+  $('attempt-back').addEventListener('click', () => attemptFrom === 'scores' ? loadScores() : attemptFrom === 'grades' ? loadGrades() : openMonitor(monitorExam));
   $('attempt-mon').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
 
   async function openAttempt(id, from) {
     attemptFrom = from;
     show('attempt');
     tip(null, null);
-    $('attempt-from').innerHTML = from === 'scores' ? '成績統計 / ' : '';
+    $('attempt-from').innerHTML = from === 'scores' ? '成績統計 / ' : from === 'grades' ? '成績總表 / ' : '';
     const d = await call('GET', '/api/admin/attempts/' + id + '/log');
     const a = d.attempt, qs = d.questions;
     $('at-title').textContent = d.student.name + '（' + d.student.student_id + '）：' + d.exam.title;
@@ -688,6 +688,178 @@
     });
     el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（這位學生看到的順序）';
   }
+
+  // ── 試題分析 ──
+
+  const pctText = v => v == null ? '—' : (Math.round(v * 10000) / 100).toFixed(2) + '%';
+
+  async function download(path, filename) {
+    const res = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+    if (!res.ok) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  $('mon-items').addEventListener('click', loadItems);
+  $('items-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+  $('items-csv').addEventListener('click', e => { e.preventDefault(); download('/api/admin/exams/' + monitorExam + '/items.csv', 'exam-' + monitorExam + '-items.csv'); });
+
+  async function loadItems() {
+    show('items');
+    tip(null, null);
+    const d = await call('GET', '/api/admin/exams/' + monitorExam + '/items');
+    $('items-title').textContent = d.exam.title + '：試題分析';
+    const alphaNote = d.alpha == null ? '' : d.alpha >= .7 ? '良好' : d.alpha >= .5 ? '尚可' : '偏低';
+    $('items-summary').innerHTML = [
+      [d.count, '已交卷人數'], [d.mean == null ? '—' : fmtNum(d.mean) + ' / ' + fmtNum(d.max_score), '平均分數'],
+      [d.items.length, '題數'], [d.alpha == null ? '—' : d.alpha.toFixed(2), '信度 α' + (alphaNote ? '（' + alphaNote + '）' : '')],
+      [d.items.filter(i => i.flags.length).length, '需要檢查的題目'],
+    ].map(([v, t]) => '<div><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+    renderItemsChart(d.items);
+    $('items-table').innerHTML = '<tr><th>題號</th><th>題型</th><th>概念名稱／能力指標</th><th class="num">配分</th><th class="num">作答記錄</th>' +
+      '<th class="num">答對率</th><th class="num">標準差</th><th class="num">隨機猜測分數</th><th class="num">預期權重</th>' +
+      '<th class="num">有效權重</th><th class="num">鑑別指數</th><th class="num">鑑別效率</th><th></th></tr>' +
+      (d.items.map(i => '<tr class="' + (i.discrimination != null && i.discrimination < 0 ? 'item-bad' : i.flags.length ? 'item-warn' : '') + '"' +
+        (i.flags.length ? ' title="' + esc(i.flags.join('\n')) + '"' : '') + '>' +
+        '<td>' + i.no + '</td><td>' + TYPE_TEXT[i.type] + '</td><td title="' + esc(i.stem) + '">' + esc(i.name) + '</td>' +
+        '<td class="num">' + fmtNum(i.points) + '</td><td class="num">' + i.count + '</td>' +
+        [i.facility, i.sd, i.guess, i.intended, i.effective, i.discrimination, i.efficiency].map(v => '<td class="num">' + pctText(v) + '</td>').join('') +
+        '<td><button class="btn ghost sm" data-item="' + i.id + '">選項分布</button></td></tr>').join('') ||
+        '<tr><td colspan="13" class="muted">這場考試沒有題目。</td></tr>');
+  }
+
+  $('items-table').addEventListener('click', e => { const id = e.target.dataset.item; if (id) loadStats(+id); });
+
+  // 答對率與鑑別效率並排；鑑別效率可能是負的，往基線下方畫
+  function renderItemsChart(items) {
+    const box = $('items-chart');
+    if (!items.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
+    const vals = items.flatMap(i => [i.facility, i.efficiency]).filter(v => v != null).map(v => v * 100);
+    const lo = Math.min(0, Math.floor(Math.min(0, ...vals) / 20) * 20), hi = 100;
+    const W = 760, H = 280, m = { t: 12, r: 12, b: 34, l: 44 };
+    box.innerHTML = '';
+    const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': '各題答對率與鑑別效率' }, box);
+    const ph = H - m.t - m.b, pw = W - m.l - m.r;
+    const y = v => m.t + ph * (hi - v) / (hi - lo);
+    for (let v = lo; v <= hi; v += 20) {
+      el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: v === 0 ? 'axis' : 'grid' }, svg);
+      el('text', { x: m.l - 6, y: y(v) + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = v + '%';
+    }
+    const slot = pw / items.length, w = Math.max(2, Math.min(22, slot * .3)), gap = 2;
+    const every = Math.ceil(items.length / 25);
+    items.forEach((it, k) => {
+      const cx = m.l + slot * k + slot / 2;
+      [[it.facility, 'mark', cx - w - gap / 2], [it.efficiency, 'mark part', cx + gap / 2]].forEach(([v, cls, x0]) => {
+        if (v == null) return;
+        const yv = y(v * 100), y0 = y(0);
+        if (Math.abs(yv - y0) < .5) return;
+        el('path', { d: v >= 0 ? barPath(x0, yv, w, y0 - yv) : barPathDown(x0, y0, w, yv - y0), class: cls }, svg);
+      });
+      if (k === items.length - 1 || (k % every === 0 && items.length - 1 - k >= every / 2))
+        el('text', { x: cx, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = it.no;
+      const hit = el('rect', { x: m.l + slot * k, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
+      hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + it.no + ' 題　' + esc(it.name) + '</b><br>答對率 ' + pctText(it.facility) +
+        '<br>鑑別效率 ' + pctText(it.efficiency) + '<br><span class="muted">鑑別指數 ' + pctText(it.discrimination) + '</span>' +
+        (it.flags.length ? '<br><span style="color:var(--ng)">' + it.flags.map(esc).join('<br>') + '</span>' : '')));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+      hit.addEventListener('click', e => { tip(e, null); loadStats(it.id); });
+    });
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（考卷順序）';
+  }
+
+  // 往下的長條：頂端貼齊基線、底部 4px 圓角
+  function barPathDown(x, y, w, h) {
+    const r = Math.min(4, w / 2, h);
+    return 'M' + x + ',' + y + 'V' + (y + h - r) + 'Q' + x + ',' + (y + h) + ' ' + (x + r) + ',' + (y + h) +
+      'H' + (x + w - r) + 'Q' + (x + w) + ',' + (y + h) + ' ' + (x + w) + ',' + (y + h - r) + 'V' + y + 'Z';
+  }
+
+  // ── 成績總表 ──
+
+  let grades = null;
+  const MARK = { right: '<span class="mark-right" title="答對">✓</span>', wrong: '<span class="mark-wrong" title="答錯">✗</span>',
+    partial: '<span class="mark-partial" title="部分得分">◐</span>', blank: '<span class="mark-blank" title="未作答">－</span>' };
+
+  $('mon-grades').addEventListener('click', loadGrades);
+  $('grades-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+  $('grades-mode').addEventListener('change', renderGrades);
+  $('grades-sort').addEventListener('change', renderGrades);
+  $('grades-xlsx').addEventListener('click', () => download('/api/admin/exams/' + monitorExam + '/grades.xlsx',
+    $('grades-title').textContent.replace('：成績總表', '') + '-成績.xlsx'));
+
+  async function loadGrades() {
+    show('grades');
+    $('grades-msg').textContent = '';
+    grades = await call('GET', '/api/admin/exams/' + monitorExam + '/gradebook');
+    $('grades-title').textContent = grades.exam.title + '：成績總表';
+    renderGradeOrder();
+    renderGrades();
+  }
+
+  function renderGradeOrder() {
+    const g = grades.grade_order;
+    $('grades-order-file').closest('label').classList.toggle('hidden', !grades.owner);
+    $('grades-order-clear').classList.toggle('hidden', !g || !g.count);
+    if (!grades.owner) {
+      $('grades-order').textContent = '這場考試開放給多個班級或不限班級，匯出依班級、學號排序。';
+      return;
+    }
+    if (!g.count) {
+      $('grades-order').innerHTML = '匯出 Excel 的學生順序：<b>依學號</b>。上傳「' + esc(grades.owner) + '」的助教成績總表後，會照總表順序排列，整欄複製就能貼回總表。';
+      return;
+    }
+    const warn = [];
+    if (g.extra.length) warn.push('名單上有、總表沒有（會列在最下面）：' + g.extra.map(s => esc(s.name) + '（' + esc(s.student_id) + '）').join('、'));
+    if (g.missing.length) warn.push('總表上有、名單沒有（會留一列空白）：' + g.missing.map(esc).join('、'));
+    $('grades-order').innerHTML = '匯出 Excel 的學生順序：<b>依「' + esc(grades.owner) + '」成績總表（' + g.count + ' 人）</b>，從第 8 列開始，和總表同一列。' +
+      (warn.length ? '<br><span style="color:var(--ng)">' + warn.join('<br>') + '</span>' : '');
+  }
+
+  $('grades-order-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      grades.grade_order = await call('POST', '/api/admin/classes/' + encodeURIComponent(grades.owner) + '/grade-order', { data: await readBase64(e.target), filename: f.name });
+      renderGradeOrder();
+      say('grades-msg', '已記住「' + f.name + '」的學生順序，之後這個班的每場考試匯出都照這個順序', true);
+    } catch (err) { say('grades-msg', err.message); }
+    e.target.value = '';
+  });
+  $('grades-order-clear').addEventListener('click', async () => {
+    grades.grade_order = await call('DELETE', '/api/admin/classes/' + encodeURIComponent(grades.owner) + '/grade-order');
+    renderGradeOrder();
+  });
+
+  function renderGrades() {
+    const g = grades, byResp = $('grades-mode').value === 'response';
+    const rows = g.rows.slice();
+    const sort = $('grades-sort').value;
+    if (sort === 'high') rows.sort((a, b) => b.score - a.score);
+    if (sort === 'low') rows.sort((a, b) => a.score - b.score);
+    const head = '<tr><th>姓名</th><th>學號</th><th>開始</th><th>完成</th><th>作答時間</th><th class="num">成績/' + fmtNum(g.max_score) + '</th>' +
+      g.questions.map(q => '<th class="num" title="' + esc(q.name) + '">Q' + q.no + '<br><span class="muted">/' + fmtNum(q.points) + '</span></th>').join('') + '</tr>';
+    const body = rows.map(r => '<tr><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
+      '<td>' + esc(r.student_id) + '</td><td>' + esc(fmtTime(r.started_at)) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td>' +
+      '<td>' + fmtSec(r.seconds) + '</td><td class="num"><b>' + fmtNum(r.score) + '</b></td>' +
+      r.cells.map(c => byResp
+        ? '<td class="resp">' + MARK[c.state] + ' ' + esc(c.response || '') + '</td>'
+        : '<td class="num">' + MARK[c.state] + (c.score == null ? '' : ' ' + fmtNum(c.score)) + '</td>').join('') + '</tr>').join('');
+    const n = rows.length;
+    const avg = n ? '<tr class="avg-row"><td colspan="5">整體平均（' + n + ' 人）</td><td class="num">' + fmtNum(rows.reduce((s, r) => s + r.score, 0) / n) + '</td>' +
+      g.questions.map((q, k) => {
+        const sum = rows.reduce((s, r) => s + (r.cells[k].score || 0), 0);
+        return '<td class="num">' + fmtNum(sum / n) + '<br><span class="muted">' + Math.round(sum / n / (q.points || 1) * 100) + '%</span></td>';
+      }).join('') + '</tr>' : '';
+    $('grades-table').innerHTML = head + (body || '<tr><td colspan="' + (6 + g.questions.length) + '" class="muted">還沒有人交卷。</td></tr>') + avg;
+  }
+
+  $('grades-table').addEventListener('click', e => {
+    const a = e.target.closest('[data-attempt]');
+    if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); }
+  });
 
   // ── 座位分析 ──
 

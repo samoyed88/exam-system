@@ -136,6 +136,7 @@ MIGRATIONS = [
     # 有值時優先於 multi_mode（multi_mode 的 CHECK 限制改不了，API 對外稱為 weighted）
     ("questions", "weights", "TEXT NOT NULL DEFAULT ''"),
     ("exam_questions", "points", "REAL"),          # 這場考試的配分；NULL = 用題庫預設配分
+    ("classes", "grade_order", "TEXT NOT NULL DEFAULT ''"),  # 助教成績總表的學號順序（JSON），匯出時照這個順序
 ]
 
 

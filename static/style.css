@@ -419,6 +419,25 @@ tr.same-sync td { background: var(--warn-soft); }
 tr.pair-row { cursor: pointer; }
 @media (max-width: 960px) { .seat-input { grid-template-columns: 1fr; } }
 
+/* ── 試題分析、成績總表 ── */
+tr.item-bad td { background: var(--ng-soft); }
+tr.item-warn td { background: var(--warn-soft); }
+td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.explain { margin-top: .9rem; font-size: .88rem; }
+.explain summary { cursor: pointer; color: var(--brand); }
+.explain dl { display: grid; grid-template-columns: 9rem 1fr; gap: .35rem 1rem; margin-top: .6rem; }
+.explain dt { font-weight: 700; }
+.explain dd { color: var(--text-muted); }
+.grades-wrap { max-height: 70vh; }
+.grades-wrap td, .grades-wrap th { white-space: nowrap; }
+.grades-wrap td.resp { white-space: normal; min-width: 8rem; max-width: 16rem; font-size: .82rem; }
+.mark-right { color: var(--ok); font-weight: 700; }
+.mark-wrong { color: var(--ng); font-weight: 700; }
+.mark-partial { color: #a86f12; font-weight: 700; }
+.mark-blank { color: var(--text-muted); }
+tr.avg-row td { font-weight: 700; background: var(--surface-2); border-top: 1.5px solid var(--rule); }
+@media (max-width: 640px) { .explain dl { grid-template-columns: 1fr; } }
+
 /* ── 班級分頁 ── */
 .class-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: 1rem; }
 .class-tabs button { font: inherit; font-size: .9rem; padding: .35rem .8rem; border: 1px solid var(--border-strong); background: #fff; border-radius: 3px; cursor: pointer; color: var(--text); }
