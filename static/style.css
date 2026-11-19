@@ -395,7 +395,7 @@ a.link-cell { cursor: pointer; }
 /* ── 座位分析 ── */
 .seat-input { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 340px); gap: 1rem; align-items: start; }
 .seat-input .hint p { margin-bottom: .45rem; }
-.seat-front { text-align: center; font-family: var(--serif); letter-spacing: .4em; font-size: .85rem; color: var(--text-muted); border: 1px solid var(--border); border-bottom: 2px solid var(--rule); background: var(--surface-2); max-width: 280px; margin: .25rem auto 1rem; padding: .2rem; }
+.seat-front { text-align: center; font-family: var(--serif); letter-spacing: .3em; font-size: .85rem; color: var(--text-muted); border: 1px solid var(--border); border-bottom: 2px solid var(--rule); background: var(--surface-2); max-width: 280px; margin: .25rem auto 1rem; padding: .2rem; }
 .seat-scroll { overflow-x: auto; padding-bottom: .25rem; }
 .seat-grid { display: grid; margin: 0 auto; width: max-content; }
 .seat { width: 92px; min-height: 62px; border: 1px solid var(--border-strong); background: #fff; border-radius: 2px; padding: .3rem .4rem; font-size: .78rem; line-height: 1.35; }

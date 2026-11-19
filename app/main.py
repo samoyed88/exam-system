@@ -1,5 +1,6 @@
 """考試系統後端：學生以學號進場作答，老師後台管理名單、題庫、考試與成績。"""
 import asyncio
+import base64
 import csv
 import hashlib
 import io
@@ -29,7 +30,10 @@ from .auth import (
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
 from .roster import parse_csv, parse_xlsx
-from .seating import RELATION_TEXT, Analyzer, neighbor_pairs, normalize, parse_seat_map
+from .seating import (
+    RELATION_TEXT, Analyzer, clean_sheet, neighbor_pairs, normalize, parse_seat_map, sheet_rows_from_file,
+    split_label,
+)
 
 TZ = ZoneInfo(os.getenv("TZ_NAME", "Asia/Taipei"))
 GRACE_SECONDS = 30  # 網路延遲寬限：時間到後 30 秒內送達的作答仍收
@@ -1313,6 +1317,11 @@ class SeatMapIn(BaseModel):
     seat_map: str
 
 
+class SeatFileIn(BaseModel):
+    data: str              # base64
+    filename: str
+
+
 def submitted_answers(db, exam_id: int) -> tuple[dict, dict]:
     """已交卷學生的作答：學號 → {題目 id: (標準化答案, 是否答錯, 作答時間)}，以及作答紀錄列。"""
     qs = {q["id"]: q for q in exam_questions(db, exam_id)}
@@ -1335,10 +1344,25 @@ def submitted_answers(db, exam_id: int) -> tuple[dict, dict]:
 @app.put("/api/admin/exams/{exam_id}/seats", dependencies=[admin])
 def save_seats(exam_id: int, body: SeatMapIn, db=Depends(get_db)):
     exam_or_404(db, exam_id)
-    grid = parse_seat_map(body.seat_map)
+    return store_seats(db, exam_id, parse_seat_map(body.seat_map))
+
+
+@app.post("/api/admin/exams/{exam_id}/seats/import", dependencies=[admin])
+def import_seats(exam_id: int, body: SeatFileIn, db=Depends(get_db)):
+    exam_or_404(db, exam_id)
+    try:
+        rows = sheet_rows_from_file(base64.b64decode(body.data), body.filename)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return store_seats(db, exam_id, clean_sheet(rows))
+
+
+def store_seats(db, exam_id: int, grid: list[list[str]]) -> dict:
     if len(grid) > 60 or any(len(r) > 40 for r in grid):
         raise HTTPException(400, "座位表最多 60 排、每排 40 個座位")
-    db.execute("UPDATE exams SET seat_map = ? WHERE id = ?", (body.seat_map.strip(), exam_id))
+    # 存整理後的格子，之後在文字框裡看到、改的就是系統認得的樣子
+    text = "\n".join(",".join(r) for r in grid)
+    db.execute("UPDATE exams SET seat_map = ? WHERE id = ?", (text, exam_id))
     return seat_analysis(exam_id, db)
 
 
@@ -1364,8 +1388,10 @@ def seat_analysis(exam_id: int, db=Depends(get_db)):
             if not label:
                 cells.append(None)
                 continue
-            sid = label if label in attempts else by_device.get(label.lower())
-            cell = {"label": label, "student_id": sid, "level": 0}
+            # 「學號姓名」格子取出學號；不是學號就當電腦代碼找
+            code, _ = split_label(label)
+            sid = code if code in attempts else by_device.get(label.lower())
+            cell = {"label": label, "code": code, "student_id": sid, "level": 0}
             if sid:
                 seat_of[(r, c)] = sid
                 a = attempts[sid]

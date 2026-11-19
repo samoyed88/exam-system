@@ -765,3 +765,63 @@ def test_seat_analysis_endpoint_and_compare(client):
     assert client.put(f"/api/admin/exams/{exam_id}/seats", json={"seat_map": too_big}, headers=h).status_code == 400
     s = student_headers(client, "11201")
     assert client.get(f"/api/admin/exams/{exam_id}/seats", headers=s).status_code == 401
+
+
+# 老師實際使用的座位表（Google 試算表）：白板在上、A 欄序號、合併儲存格、保留、前後門
+SCHOOL_SHEET = [
+    ["", "", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["序號", "白板", "", "", "", "", "", "", "", "", "", "", "", ""],
+    ["1", "12400212李柔萱", "", "", "", "15130841賴郁方", "", "15131586鄭紹如", "", "14133021盧君愷", "", "15130193高惟君", "", "前門"],
+    ["2", "12400371魏子馨", "", "", "", "15130700陳俊宇", "", "15130893邱晴筠", "", "13131502曾俊傑", "", "15130166蔡紫瀅", "", ""],
+    ["3", "12400230陳秀青", "", "15130690鐘子淇", "", "15130150蕭裕諺", "", "", "", "", "", "15130636董語瑄", "", ""],
+    ["12", "15130620 周宸瑋", "", "15130884呂秉翰", "", "15130991汪家揚", "", "15131650盧俊佑", "", "14111353徐子涵", "", "保留", "", ""],
+    ["13", "12131573吳旻翰", "", "15130955陳澤鈞", "", "15130786何誠儒", "", "15130645王博玄", "", "15130212王心如", "", "保留", "", "後門"],
+    ["14", "保留", "", "保留", "", "保留", "", "保留", "", "保留", "", "保留", "", ""],
+]
+
+
+def test_school_seat_sheet_is_cleaned():
+    from app.seating import neighbor_pairs, parse_seat_map, split_label
+    text = "\n".join("\t".join(r) for r in SCHOOL_SHEET)
+    grid = parse_seat_map(text)
+    assert len(grid) == 5 and all(len(r) == 6 for r in grid)       # 6 欄座位、5 排有人
+    assert grid[0] == ["12400212李柔萱", "", "15130841賴郁方", "15131586鄭紹如", "14133021盧君愷", "15130193高惟君"]
+    assert grid[3][5] == "" and grid[4][0] == "12131573吳旻翰"       # 保留不是座位
+    assert split_label("15130620 周宸瑋") == ("15130620", "周宸瑋")
+    assert split_label("PC01") == ("PC01", "")
+    pairs = {(grid[a[0]][a[1]][:8], grid[b[0]][b[1]][:8], rel) for a, b, rel in neighbor_pairs(grid)}
+    assert ("15130841", "15131586", "lr") in pairs                    # 左右
+    assert ("12400212", "12400371", "fb") in pairs                    # 前後
+    assert not any("12400212" in (x, y) and rel == "lr" for x, y, rel in pairs)  # 旁邊是空位
+
+
+def test_seat_import_xlsx_with_merged_cells(client):
+    import base64
+    import io
+    import openpyxl
+    h, exam_id = setup_exam(client)
+    for sid in ("11201", "11202", "11203"):
+        s = student_headers(client, sid)
+        aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+        client.post(f"/api/attempts/{aid}/submit", headers=s)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    rows = [["序號", "白板", "", "", ""], ["1", "11201王小明", "", "11202 李小華", ""], ["2", "11203陳大文", "", "保留", ""]]
+    for row in rows:
+        ws.append(row)
+    ws.merge_cells("B1:E1")
+    for r in (2, 3):
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=5)
+    buf = io.BytesIO()
+    wb.save(buf)
+    r = client.post(f"/api/admin/exams/{exam_id}/seats/import",
+                    json={"data": base64.b64encode(buf.getvalue()).decode(), "filename": "座位表.xlsx"}, headers=h)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["seat_map"] == "11201王小明,11202 李小華\n11203陳大文,"
+    assert [[c and c["student_id"] for c in row] for row in d["grid"]] == [["11201", "11202"], ["11203", None]]
+    assert {(p["a"]["student_id"], p["b"]["student_id"]) for p in d["pairs"]} == {("11201", "11202"), ("11201", "11203")}
+    bad = client.post(f"/api/admin/exams/{exam_id}/seats/import",
+                      json={"data": base64.b64encode(b"not a zip").decode(), "filename": "x.xlsx"}, headers=h)
+    assert bad.status_code == 400

@@ -19,15 +19,81 @@ SYNC_SECONDS = 30
 RELATION_TEXT = {"lr": "左右相鄰", "fb": "前後相鄰"}
 
 
+FRONT_WORDS = ("白板", "黑板", "講台", "講桌", "螢幕", "投影幕")
+NOT_SEAT = re.compile(r"^(保留|空|空位|無|[xX]|-|—|前門|後門|門|窗|窗戶|走道|序號|座號|排|\d{1,3})$")
+SID_IN_LABEL = re.compile(r"^([A-Za-z]{0,4}\d{3,12})\s*(.*)$")
+
+
 def parse_seat_map(text: str) -> list[list[str]]:
-    """每行一排，逗號或 Tab 分隔；空格子代表走道。可直接從 Excel 複製貼上。"""
-    rows = []
-    for line in text.replace("\r", "").split("\n"):
-        if not line.strip():
-            continue
-        rows.append([c.strip() for c in re.split(r"[,\t，]", line)])
+    """每行一排，逗號或 Tab 分隔；空格子代表沒有人坐（走道或空位），兩側不算相鄰。
+    從試算表整份複製貼上時（有「白板」「保留」「序號」等字），自動整理成座位格。"""
+    rows = [[c.strip() for c in re.split(r"[,\t，]", line)]
+            for line in text.replace("\r", "").split("\n") if line.strip()]
+    return clean_sheet(rows) if looks_like_sheet(rows) else _pad(rows)
+
+
+def looks_like_sheet(rows: list[list[str]]) -> bool:
+    return any(any(w in c for w in FRONT_WORDS) or c in ("保留", "序號", "前門", "後門")
+               for r in rows for c in r)
+
+
+def is_seat(cell: str) -> bool:
+    cell = cell.strip()
+    return bool(cell) and not NOT_SEAT.match(cell) and not any(w in cell for w in FRONT_WORDS)
+
+
+def clean_sheet(rows: list[list[str]]) -> list[list[str]]:
+    """學校常見的座位表試算表：白板那列以下是座位，A 欄序號，「保留」與門窗不是座位，
+    合併儲存格會在旁邊留下整欄空白。整理後第一排是最靠白板的一排。"""
+    marker = next((i for i, r in enumerate(rows) if any(any(w in c for w in FRONT_WORDS) for c in r)), None)
+    if marker is not None:
+        above, below = rows[:marker], rows[marker + 1:]
+        count = lambda rs: sum(is_seat(c) for r in rs for c in r)
+        # 白板畫在表格下方時，最下面那排才是第一排
+        rows = list(reversed(above)) if count(above) > count(below) else below
+    rows = [[c.strip() if is_seat(c) else "" for c in r] for r in _pad(rows)]
+    rows = [r for r in rows if any(r)]
+    keep = [i for i in range(len(rows[0]) if rows else 0) if any(r[i] for r in rows)]
+    return [[r[i] for i in keep] for r in rows]
+
+
+def split_label(label: str) -> tuple[str, str]:
+    """「15130841賴郁方」「15130620 周宸瑋」→ (學號, 姓名)；其他（電腦代碼）原樣回傳。"""
+    m = SID_IN_LABEL.match(label.strip())
+    return (m[1], m[2].strip()) if m else (label.strip(), "")
+
+
+def _pad(rows: list[list[str]]) -> list[list[str]]:
     width = max((len(r) for r in rows), default=0)
     return [r + [""] * (width - len(r)) for r in rows]
+
+
+def sheet_rows_from_file(data: bytes, filename: str) -> list[list[str]]:
+    """上傳的 xlsx／csv → 儲存格文字。xlsx 取第一個看得到座位的工作表。"""
+    if filename.lower().endswith(".csv"):
+        import csv
+        import io
+        text = data.decode("utf-8-sig", errors="replace")
+        return [[c.strip() for c in row] for row in csv.reader(io.StringIO(text))]
+    import io
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        raise ValueError("無法讀取這個檔案，請上傳 .xlsx 或 .csv")
+    for ws in wb.worksheets:
+        rows = [[_cell(v) for v in r] for r in ws.iter_rows(max_row=200, max_col=60, values_only=True)]
+        if rows and any(any(r) for r in clean_sheet(rows)):
+            return rows
+    raise ValueError("檔案裡找不到座位")
+
+
+def _cell(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return str(v).strip()
 
 
 def neighbor_pairs(grid: list[list[str]]) -> list[tuple[tuple[int, int], tuple[int, int], str]]:

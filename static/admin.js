@@ -672,6 +672,23 @@
     } catch (err) { say('seat-msg', err.message); }
   });
   $('seat-prev').addEventListener('click', () => { $('seat-map').value = seats.previous.seat_map; $('seat-save').click(); });
+  $('seat-file').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    try {
+      renderSeats(await call('POST', '/api/admin/exams/' + monitorExam + '/seats/import', { data, filename: file.name }));
+      $('seat-compare-card').classList.add('hidden');
+      const n = seats.grid.flat().filter(c => c).length;
+      say('seat-msg', '已匯入「' + file.name + '」：' + seats.grid.length + ' 排、' + n + ' 個座位', true);
+    } catch (err) { say('seat-msg', err.message); }
+  });
 
   function renderSeats(d) {
     seats = d;
@@ -690,7 +707,7 @@
     $('seat-others-card').classList.toggle('hidden', !d.others.length);
     $('seat-others').innerHTML = pairHead(false) + d.others.map(p => pairRow(p, false)).join('');
     const notes = [];
-    if (d.unmatched.length) notes.push('座位表上對應不到交卷學生的格子：' + d.unmatched.map(esc).join('、') + '（缺考、代碼打錯，或同一台電腦被另一位學生使用）');
+    if (d.unmatched.length) notes.push('座位表上沒有交卷紀錄的座位（' + d.unmatched.length + '）：' + d.unmatched.map(esc).join('、') + '（缺考、學號或代碼打錯，或同一台電腦被另一位學生使用）');
     if (d.unseated.length) notes.push('已交卷但不在座位表上：' + d.unseated.map(s => esc(s.name) + '（' + esc(s.student_id) + (s.device ? '，' + esc(s.device) : '') + '）').join('、'));
     $('seat-notes').innerHTML = notes.join('<br>');
   }
@@ -719,9 +736,10 @@
   function seatCell(cell, r, c) {
     if (!cell) return '<div class="seat aisle"></div>';
     const pos = 'data-cell="' + r + ',' + c + '"';
-    if (!cell.student_id) return '<div class="seat unmatched" ' + pos + '><div class="pc">' + esc(cell.label) + '</div><div>—</div></div>';
+    if (!cell.student_id) return '<div class="seat unmatched" ' + pos + ' title="' + esc(cell.label) + '"><div class="pc">' + esc(cell.code) + '</div>' +
+      '<div class="nm">' + esc(cell.label.slice(cell.code.length).trim() || '—') + '</div><div class="sc">未交卷</div></div>';
     return '<div class="seat' + (cell.level ? ' lv' + cell.level : '') + '" ' + pos + ' title="' + esc(cell.name + '（' + cell.student_id + '）') + '">' +
-      '<div class="pc">' + esc(cell.label) + '</div><div class="nm">' + esc(cell.name) + '</div>' +
+      '<div class="pc">' + esc(cell.code) + '</div><div class="nm">' + esc(cell.name) + '</div>' +
       '<div class="sc">' + fmtNum(cell.score) + ' / ' + fmtNum(cell.max_score) + '</div></div>';
   }
 

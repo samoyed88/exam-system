@@ -207,12 +207,13 @@
     <div class="seat-input">
       <textarea id="seat-map" class="mono" rows="8" spellcheck="false" placeholder="PC01,PC02,PC03,,PC04,PC05,PC06&#10;PC07,PC08,PC09,,PC10,PC11,PC12"></textarea>
       <div class="hint">
-        <p>每行一排，<b>第一行是最靠近講台的一排</b>。格子之間用逗號或 Tab 分隔，可直接從 Excel 複製貼上；<b>空格子代表走道</b>（走道兩側不算左右相鄰）。</p>
-        <p>格子可以填<b>電腦代碼</b>（學生在考場電腦開 /setup 設定的）或<b>學號</b>。</p>
+        <p><b>最簡單：直接匯入座位表的 Excel／CSV</b>，或在試算表全選複製後貼上。格子寫「學號＋姓名」（例如 15130841賴郁方）即可；「白板」那一側當作第一排，序號、保留、前後門會自動略過。</p>
+        <p>也可以自己打：每行一排、逗號分隔，格子填學號或電腦代碼（學生在考場電腦開 /setup 設定的）。<b>空格子代表沒人坐</b>，兩側不算相鄰。</p>
         <p id="seat-devices"></p>
       </div>
     </div>
     <div class="row" style="margin-top:.75rem">
+      <label class="btn ghost" style="margin:0">匯入 Excel／CSV<input type="file" id="seat-file" accept=".xlsx,.csv" hidden></label>
       <button class="btn" id="seat-save">儲存並分析</button>
       <button class="btn ghost hidden" id="seat-prev"></button>
     </div>
@@ -224,7 +225,7 @@
         <div class="card-title" style="margin:0">座位圖</div>
         <div class="chart-legend" style="margin:0"><span><i class="sw ng"></i>高度可疑</span><span><i class="sw part"></i>需要留意</span><span><i class="sw empty"></i>座位沒有對應到交卷的學生</span><span class="muted">點格子間的紅線或下方表格看逐題比對</span></div>
       </div>
-      <div class="seat-front">講　台</div>
+      <div class="seat-front">白板／講台</div>
       <div class="seat-scroll"><div class="seat-grid" id="seat-grid"></div></div>
       <div class="muted" id="seat-notes" style="margin-top:.6rem"></div>
     </div>
