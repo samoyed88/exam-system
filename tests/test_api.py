@@ -934,6 +934,11 @@ def test_weighted_question_and_exam_points(client):
     assert next(x for x in client.get("/api/admin/questions", headers=h).json() if x["id"] == qid)["points"] == 2
     got.update(question_points={"1": 0})
     assert client.put(f"/api/admin/exams/{eid}", json=got, headers=h).status_code == 400
+    # 沒帶配分欄位（例如只改時間）時保留原本的配分
+    got.pop("question_points")
+    got.update(duration_min=20)
+    assert client.put(f"/api/admin/exams/{eid}", json=got, headers=h).status_code == 200
+    assert client.get(f"/api/admin/exams/{eid}", headers=h).json()["question_points"] == {"1": 24, str(qid): 6}
 
 
 # ── 試題分析、成績總表、匯出 Excel ──

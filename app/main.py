@@ -744,7 +744,9 @@ class ExamIn(BaseModel):
     review_until: str = ""
     allowed_ips: str = ""
     published: bool = False
-    question_points: dict[int, float] = {}   # 題目 id → 這場考試的配分；沒列的用題庫預設
+    # 題目 id → 這場考試的配分；沒列的題目用題庫預設。整個欄位沒帶（None）時保留原本的配分，
+    # 舊版頁面或其他工具只改考試時間時，才不會把配分全部清掉
+    question_points: dict[int, float] | None = None
     focus_mode: str = "record"
     focus_limit: int = 3
     fullscreen: bool = False
@@ -1236,7 +1238,7 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     try:
         marks = ", ".join("?" * len(values))
         cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES ({marks})", values)
-        set_exam_questions(db, cur.lastrowid, body.question_ids, body.question_points)
+        set_exam_questions(db, cur.lastrowid, body.question_ids, body.question_points or {})
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -1250,6 +1252,9 @@ def update_exam(exam_id: int, body: ExamIn, db=Depends(get_db)):
     values = exam_values(body)
     has_attempts = db.execute("SELECT 1 FROM attempts WHERE exam_id = ?", (exam_id,)).fetchone()
     current = [q["id"] for q in exam_questions(db, exam_id)]
+    if body.question_points is None:
+        body.question_points = {r["question_id"]: r["points"] for r in db.execute(
+            "SELECT question_id, points FROM exam_questions WHERE exam_id = ? AND points IS NOT NULL", (exam_id,))}
     if has_attempts and body.question_ids != current:
         raise HTTPException(409, "已經有學生作答，不能再改題目；其他設定可以改")
     db.execute("BEGIN")
