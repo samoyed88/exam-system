@@ -596,8 +596,10 @@
     if (!qs.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
     const W = 760, H = 240, m = { t: 12, r: 12, b: 30, l: 48 };
     const top = Math.max(10, ...qs.map(q => Math.max(q.seconds, q.avg_seconds || 0)));
-    const step = niceStep(top, 4), yMax = Math.ceil(top / step) * step;
-    const svg = frame(box, W, H, m, yMax, step, v => v >= 60 ? Math.round(v / 6) / 10 + ' 分' : v + ' 秒');
+    // 刻度取整秒、整分，避免出現「1.7 分」
+    const step = [10, 15, 20, 30, 60, 120, 180, 300, 600, 900].find(s => s * 4 >= top) || 1800;
+    const yMax = Math.ceil(top / step) * step;
+    const svg = frame(box, W, H, m, yMax, step, v => v < 60 ? v + ' 秒' : v % 60 ? Math.floor(v / 60) + ' 分 ' + v % 60 + ' 秒' : v / 60 + ' 分');
     const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
     const gap = Math.min(2, slot * .2), every = Math.ceil(qs.length / 25);
     qs.forEach((q, i) => {
