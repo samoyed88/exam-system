@@ -34,7 +34,7 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students', 'logs'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
@@ -69,6 +69,7 @@
     if (tab === 'exams') loadExams();
     if (tab === 'questions') loadQuestions();
     if (tab === 'students') loadStudents();
+    if (tab === 'logs') loadLogs();
   }
 
   function readFile(input) {
@@ -1088,6 +1089,7 @@
     $('q-opt-wrap').classList.toggle('hidden', t === 'fill');
     $('q-multi-wrap').classList.toggle('hidden', t !== 'multi');
     $('q-weights-wrap').classList.toggle('hidden', t !== 'multi' || $('q-multi').value !== 'weighted');
+    $('q-case-wrap').classList.toggle('hidden', t !== 'fill');
     $('q-answer-label').textContent = {
       single: '正確答案（一個字母，例如 B）',
       multi: '正確答案（用分號分隔，例如 A;C）',
@@ -1103,6 +1105,7 @@
     $('q-points').value = q.points;
     $('q-multi').value = q.multi_mode;
     $('q-weights').value = (q.weights || []).map(w => +w.toFixed(4)).join(';');
+    $('q-case').checked = !!q.case_sensitive;
     $('q-tags').value = q.tags;
     $('q-stem').value = q.stem;
     $('q-code').value = q.code;
@@ -1128,6 +1131,7 @@
       answer, explanation: $('q-explain').value, points: +$('q-points').value,
       multi_mode: $('q-multi').value, tags: $('q-tags').value,
       weights: $('q-multi').value === 'weighted' ? $('q-weights').value.split(/[;,\s]+/).filter(Boolean).map(Number) : [],
+      case_sensitive: $('q-case').checked,
     };
     try {
       if (editingQ) await call('PUT', '/api/admin/questions/' + editingQ, body);
@@ -1159,6 +1163,54 @@
     } catch (err) { say('q-msg', err.message); }
     e.target.value = '';
   });
+
+  // ── 操作日誌 ──
+
+  let logRows = [];
+  let logTimer = null;
+
+  async function loadLogs(more) {
+    const params = new URLSearchParams({ limit: 100, q: $('log-q').value, action: $('log-action').value });
+    if (more && logRows.length) params.set('before', logRows[logRows.length - 1].id);
+    const d = await call('GET', '/api/admin/logs?' + params);
+    logRows = more ? logRows.concat(d.rows) : d.rows;
+    const current = $('log-action').value;
+    $('log-action').innerHTML = '<option value="">所有動作</option>' + d.actions.map(a => '<option' + (a === current ? ' selected' : '') + '>' + esc(a) + '</option>').join('');
+    $('log-more').classList.toggle('hidden', d.rows.length < 100);
+    renderLogs();
+  }
+
+  function logValue(v) {
+    if (v == null || v === '') return '（空）';
+    const text = typeof v === 'string' ? v : JSON.stringify(v);
+    return text.length > 120 ? text.slice(0, 120) + '…' : text;
+  }
+
+  function logDetail(detail) {
+    const keys = Object.keys(detail || {});
+    if (!keys.length) return '';
+    const isDiff = keys.every(k => Array.isArray(detail[k]) && detail[k].length === 2);
+    const body = isDiff
+      ? '<ul class="diff">' + keys.map(k => '<li><b>' + esc(k) + '</b>：<del>' + esc(logValue(detail[k][0])) + '</del> → <ins>' + esc(logValue(detail[k][1])) + '</ins></li>').join('') + '</ul>'
+      : '<pre>' + esc(JSON.stringify(detail, null, 2)) + '</pre>';
+    return '<details><summary>' + (isDiff ? '修改內容（' + keys.length + ' 項）' : '詳細內容') + '</summary>' + body + '</details>';
+  }
+
+  function renderLogs() {
+    const when = iso => { const d = new Date(iso); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':'); };
+    $('log-table').innerHTML = '<tr><th>時間</th><th>動作</th><th>對象</th><th>內容</th><th>來源</th><th>結果</th></tr>' +
+      (logRows.map(r => '<tr class="' + (r.status >= 400 ? 'log-fail' : '') + '">' +
+        '<td class="when">' + when(r.at) + '</td><td>' + esc(r.action) + '</td><td>' + esc(r.target) + '</td>' +
+        '<td>' + esc(r.summary) + logDetail(r.detail) + '</td>' +
+        '<td class="src">' + (r.actor === '後台' ? '' : '<b>' + esc(r.actor) + '</b><br>') + (r.ip ? esc(r.ip) : '') +
+        (r.device ? '<br>' + esc(r.device) : '') + (r.session ? '<br>工作階段 <code>' + esc(r.session) + '</code>' : '') + '</td>' +
+        '<td>' + (r.status >= 400 ? '<span class="badge ng">失敗 ' + r.status + '</span>' : '<span class="badge ok">成功</span>') + '</td></tr>').join('') ||
+        '<tr><td colspan="6" class="muted">沒有紀錄</td></tr>');
+  }
+
+  $('log-q').addEventListener('input', () => { clearTimeout(logTimer); logTimer = setTimeout(() => loadLogs(), 300); });
+  $('log-action').addEventListener('change', () => loadLogs());
+  $('log-more').addEventListener('click', () => loadLogs(true));
 
   // ── 名單與班級 ──
 

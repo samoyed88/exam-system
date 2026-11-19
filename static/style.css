@@ -438,6 +438,20 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 tr.avg-row td { font-weight: 700; background: var(--surface-2); border-top: 1.5px solid var(--rule); }
 @media (max-width: 640px) { .explain dl { grid-template-columns: 1fr; } }
 
+/* ── 操作日誌 ── */
+#log-table td { vertical-align: top; }
+#log-table .when { white-space: nowrap; font-family: var(--mono); font-size: .82rem; }
+#log-table .src { font-size: .8rem; color: var(--text-muted); white-space: nowrap; }
+#log-table .src code { font-family: var(--mono); color: var(--text); }
+#log-table details { margin-top: .3rem; font-size: .82rem; }
+#log-table details summary { cursor: pointer; color: var(--brand); }
+#log-table .diff { margin: .35rem 0 0; padding: 0; list-style: none; }
+#log-table .diff li { margin: .15rem 0; }
+#log-table .diff del { color: var(--ng); }
+#log-table .diff ins { color: var(--ok); text-decoration: none; }
+#log-table pre { max-height: 220px; font-size: .75rem; white-space: pre-wrap; word-break: break-all; }
+tr.log-fail td { background: var(--ng-soft); }
+
 /* ── 班級分頁 ── */
 .class-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: 1rem; }
 .class-tabs button { font: inherit; font-size: .9rem; padding: .35rem .8rem; border: 1px solid var(--border-strong); background: #fff; border-radius: 3px; cursor: pointer; color: var(--text); }

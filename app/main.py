@@ -29,6 +29,7 @@ from .auth import (
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
+from . import audit
 from .analysis import flags as item_flags
 from .analysis import item_analysis, item_name, random_guess
 from .roster import parse_csv, parse_xlsx
@@ -102,6 +103,54 @@ class SecurityMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
+class AuditMiddleware:
+    """後台寫入、登入與成績下載一律記進 admin_log，處理函式用 audit.note() 補充摘要。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path, method = scope.get("path", ""), scope.get("method", "")
+        if scope["type"] != "http" or not path.startswith("/api/admin/") or \
+                (method == "GET" and not path.endswith((".csv", ".xlsx"))):
+            return await self.app(scope, receive, send)
+        ctx = {}
+        status = {"code": 500}
+
+        async def send_status(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message["status"]
+            await send(message)
+
+        token = audit.CURRENT.set(ctx)
+        try:
+            await self.app(scope, receive, send_status)
+        finally:
+            audit.CURRENT.reset(token)
+            endpoint = getattr(scope.get("endpoint"), "__name__", "")
+            if status["code"] == 401 and endpoint != "admin_login":
+                return  # 沒登入的請求不記，避免被灌爆
+            headers = Headers(scope=scope)
+            bearer = headers.get("authorization", "").removeprefix("Bearer ").strip()
+            row = dict(actor="後台", ip=client_ip(Request(scope)), device=audit.device_name(headers.get("user-agent", "")),
+                       session=ctx.get("session") or audit.session_code(bearer),
+                       action=audit.ACTIONS.get(endpoint, endpoint or path), target=ctx.get("target", ""),
+                       summary=ctx.get("summary", ""), detail=ctx.get("detail"), status=status["code"],
+                       method=method, path=path)
+            await asyncio.to_thread(_write_audit, row)
+
+
+def _write_audit(row: dict) -> None:
+    conn = connect()
+    try:
+        audit.write(conn, **row)
+    except Exception as e:  # 日誌寫失敗不能影響操作本身
+        print(f"audit failed: {e!r}", flush=True)
+    finally:
+        conn.close()
+
+
+app.add_middleware(AuditMiddleware)
 app.add_middleware(SecurityMiddleware)
 
 
@@ -152,7 +201,8 @@ def exam_questions(db, exam_id: int) -> list[sqlite3.Row]:
     # points 用這場考試設定的配分（沒設定就用題庫預設），評分、統計、學生畫面都從這裡取
     return db.execute(
         "SELECT q.id, q.type, q.stem, q.code, q.options, q.answer, q.explanation, "
-        "COALESCE(eq.points, q.points) AS points, q.points AS bank_points, q.multi_mode, q.tags, q.weights "
+        "COALESCE(eq.points, q.points) AS points, q.points AS bank_points, q.multi_mode, q.tags, q.weights, "
+        "q.case_sensitive "
         "FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
         "WHERE eq.exam_id = ? ORDER BY eq.position", (exam_id,)
     ).fetchall()
@@ -161,7 +211,7 @@ def exam_questions(db, exam_id: int) -> list[sqlite3.Row]:
 def score_answer(q: sqlite3.Row, response) -> float:
     return grade(q["type"], json.loads(q["answer"]), response, q["points"],
                  q["multi_mode"], len(json.loads(q["options"])),
-                 json.loads(q["weights"]) if q["weights"] else None)
+                 json.loads(q["weights"]) if q["weights"] else None, bool(q["case_sensitive"]))
 
 
 def log_event(db, attempt_id: int, kind: str, question_id: int | None = None,
@@ -726,6 +776,7 @@ class QuestionIn(BaseModel):
     points: float = 1
     multi_mode: str = "all"            # all 全對才給分、partial 學測式、weighted 依選項比重（可倒扣）
     weights: list[float] = []          # weighted：各選項比重（百分比，例如 33.33、-16.67）
+    case_sensitive: bool = False       # 填充題：區分大小寫（程式碼題建議開啟）
     tags: str = ""
 
 
@@ -767,8 +818,30 @@ def admin_login(body: AdminLoginIn, request: Request):
         raise HTTPException(429, "密碼錯誤次數太多，請 15 分鐘後再試")
     if not check_admin_password(body.password):
         record_failure(key)
+        audit.note("密碼錯誤")
         raise HTTPException(401, "密碼錯誤")
-    return {"token": make_token("a", admin_subject(), ADMIN_TTL)}
+    token = make_token("a", admin_subject(), ADMIN_TTL)
+    audit.note("登入成功", session=audit.session_code(token))
+    return {"token": token}
+
+
+@app.get("/api/admin/logs", dependencies=[admin])
+def admin_logs(limit: int = 100, before: int = 0, q: str = "", action: str = "", db=Depends(get_db)):
+    """後台操作日誌，新的在前；q 搜尋對象、摘要、IP、工作階段代號。"""
+    sql, args = "SELECT * FROM admin_log WHERE 1 = 1", []
+    if before:
+        sql += " AND id < ?"
+        args.append(before)
+    if action:
+        sql += " AND action = ?"
+        args.append(action)
+    if q.strip():
+        like = f"%{q.strip()}%"
+        sql += " AND (target LIKE ? OR summary LIKE ? OR ip LIKE ? OR session LIKE ? OR detail LIKE ?)"
+        args += [like] * 5
+    rows = db.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, max(1, min(limit, 500)))).fetchall()
+    return {"rows": [{**dict(r), "detail": json.loads(r["detail"] or "{}")} for r in rows],
+            "actions": [r[0] for r in db.execute("SELECT DISTINCT action FROM admin_log ORDER BY action")]}
 
 
 @app.get("/api/admin/myip", dependencies=[admin])
@@ -791,6 +864,11 @@ def list_students(db=Depends(get_db)):
 def upsert_student(body: StudentIn, db=Depends(get_db)):
     if not body.student_id.strip() or not body.name.strip():
         raise HTTPException(400, "學號與姓名必填")
+    old = db.execute("SELECT name, class_name FROM students WHERE student_id = ?", (body.student_id.strip(),)).fetchone()
+    after = {"name": body.name.strip(), "class_name": body.class_name.strip()}
+    diff = audit.changes(dict(old) if old else {}, after, {"name": "姓名", "class_name": "班級"})
+    audit.note(("修改 " if old else "新增 ") + f"{body.student_id.strip()} {after['name']}" +
+               ("：" + "、".join(diff) if old and diff else ""), diff, target=f"學生 {body.student_id.strip()}")
     db.execute("INSERT INTO students (student_id, name, class_name) VALUES (?, ?, ?) "
                "ON CONFLICT (student_id) DO UPDATE SET "
                "name = excluded.name, class_name = excluded.class_name",
@@ -833,7 +911,13 @@ def import_students(body: CsvIn, db=Depends(get_db)):
         rows = parse_csv(body.csv)
     except ValueError as e:
         raise HTTPException(400, f"{e}（CSV 第一列要有 學號、姓名，或 student_id、name）")
+    roster_note(rows, body.replace, body.class_name)
     return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
+
+
+def roster_note(rows, replace: bool, class_name: str) -> None:
+    audit.note(f"{len(rows)} 人" + (f"到「{class_name}」" if class_name.strip() else "") + ("，並清除舊名單" if replace else ""),
+               {"學號": [r[0] for r in rows][:500]}, target=f"班級 {class_name}" if class_name.strip() else "")
 
 
 @app.post("/api/admin/students/import-xlsx", dependencies=[admin])
@@ -844,6 +928,7 @@ def import_students_xlsx(body: XlsxIn, db=Depends(get_db)):
         rows = parse_xlsx(body.data)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    roster_note(rows, body.replace, body.class_name)
     return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
 
 
@@ -902,6 +987,7 @@ def create_class(body: ClassIn, db=Depends(get_db)):
     if db.execute("SELECT 1 FROM classes WHERE name = ?", (name,)).fetchone():
         raise HTTPException(409, "已經有這個班級")
     db.execute("INSERT INTO classes (name) VALUES (?)", (name,))
+    audit.note(f"「{name}」", target=f"班級 {name}")
     return {"ok": True, "name": name}
 
 
@@ -925,6 +1011,7 @@ def rename_class(name: str, body: ClassIn, db=Depends(get_db)):
     except Exception:
         db.execute("ROLLBACK")
         raise
+    audit.note(f"「{name}」→「{new}」", {"班級": [name, new]}, target=f"班級 {new}")
     return {"ok": True, "name": new}
 
 
@@ -949,6 +1036,7 @@ def delete_class(name: str, students: str = "keep", db=Depends(get_db)):
     except Exception:
         db.execute("ROLLBACK")
         raise
+    audit.note(f"「{name}」：刪除 {deleted} 位學生、{kept} 位移到未分班", target=f"班級 {name}")
     return {"ok": True, "deleted": deleted, "unassigned": kept}
 
 
@@ -988,16 +1076,21 @@ def get_class_seats(name: str, db=Depends(get_db)):
 
 @app.put("/api/admin/classes/{name}/seats", dependencies=[admin])
 def save_class_seats(name: str, body: SeatMapIn, db=Depends(get_db)):
-    class_or_404(db, name)
-    db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (grid_text(parse_seat_map(body.seat_map)), name))
+    return store_class_seats(db, name, parse_seat_map(body.seat_map))
+
+
+def store_class_seats(db, name: str, grid: list[list[str]]) -> dict:
+    old = class_or_404(db, name)["seat_map"]
+    text = grid_text(grid)
+    db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (text, name))
+    audit.note(f"「{name}」{sum(1 for r in grid for c in r if c)} 個座位", {"座位表": [old, text]}, target=f"班級 {name}")
     return class_seat_view(db, name)
 
 
 @app.post("/api/admin/classes/{name}/seats/import", dependencies=[admin])
 def import_class_seats(name: str, body: SeatFileIn, db=Depends(get_db)):
     class_or_404(db, name)
-    db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (grid_text(read_seat_file(body)), name))
-    return class_seat_view(db, name)
+    return store_class_seats(db, name, read_seat_file(body))
 
 
 def grid_text(grid: list[list[str]]) -> str:
@@ -1016,6 +1109,7 @@ def read_seat_file(body) -> list[list[str]]:
 
 @app.post("/api/admin/students/{student_id}/reset-password", dependencies=[admin])
 def reset_student_password(student_id: str, db=Depends(get_db)):
+    audit.note(f"{student_id} {student_label(db, student_id)}", target=f"學生 {student_id}")
     db.execute("UPDATE students SET password_hash = '' WHERE student_id = ?", (student_id,))
     return {"ok": True}
 
@@ -1024,8 +1118,14 @@ def reset_student_password(student_id: str, db=Depends(get_db)):
 def delete_student(student_id: str, db=Depends(get_db)):
     if db.execute("SELECT 1 FROM attempts WHERE student_id = ?", (student_id,)).fetchone():
         raise HTTPException(409, "這位學生已有作答紀錄，不能刪除")
+    audit.note(f"{student_id} {student_label(db, student_id)}", target=f"學生 {student_id}")
     db.execute("DELETE FROM students WHERE student_id = ?", (student_id,))
     return {"ok": True}
+
+
+def student_label(db, sid: str) -> str:
+    r = db.execute("SELECT name, class_name FROM students WHERE student_id = ?", (sid,)).fetchone()
+    return f"{r['name']}（{r['class_name'] or '未分班'}）" if r else ""
 
 
 def question_values(q: QuestionIn) -> tuple:
@@ -1062,7 +1162,7 @@ def question_values(q: QuestionIn) -> tuple:
     mode = "partial" if q.multi_mode == "weighted" else q.multi_mode
     return (q.type, q.stem.strip(), q.code, json.dumps(options, ensure_ascii=False),
             json.dumps(answer, ensure_ascii=False), q.explanation, q.points,
-            mode, q.tags, weights)
+            mode, q.tags, weights, int(q.case_sensitive and q.type == "fill"))
 
 
 def question_dict(r: sqlite3.Row) -> dict:
@@ -1085,15 +1185,26 @@ def list_questions(db=Depends(get_db)):
 def create_question(body: QuestionIn, db=Depends(get_db)):
     cur = db.execute(
         "INSERT INTO questions (type, stem, code, options, answer, explanation, points, "
-        "multi_mode, tags, weights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", question_values(body))
+        "multi_mode, tags, weights, case_sensitive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", question_values(body))
+    audit.note(f"#{cur.lastrowid} {item_name(body.tags, body.stem)}", target=f"題目 #{cur.lastrowid}")
     return {"ok": True, "id": cur.lastrowid}
+
+
+QUESTION_LABELS = {"type": "題型", "stem": "題幹", "code": "程式碼", "options": "選項", "answer": "答案",
+                   "explanation": "解析", "points": "預設配分", "multi_mode": "多選計分", "tags": "標籤",
+                   "weights": "選項比重", "case_sensitive": "區分大小寫"}
 
 
 @app.put("/api/admin/questions/{qid}", dependencies=[admin])
 def update_question(qid: int, body: QuestionIn, db=Depends(get_db)):
     values = question_values(body)
+    old = db.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
+    if old:
+        diff = audit.changes({k: old[k] for k in QUESTION_LABELS}, dict(zip(QUESTION_LABELS, values)), QUESTION_LABELS)
+        audit.note(f"#{qid} {item_name(old['tags'], old['stem'])}" + ("：" + "、".join(diff) if diff else "（沒有變更）"),
+                   diff, target=f"題目 #{qid}")
     db.execute("UPDATE questions SET type = ?, stem = ?, code = ?, options = ?, answer = ?, "
-               "explanation = ?, points = ?, multi_mode = ?, tags = ?, weights = ? WHERE id = ?",
+               "explanation = ?, points = ?, multi_mode = ?, tags = ?, weights = ?, case_sensitive = ? WHERE id = ?",
                (*values, qid))
     regrade_question(db, qid)
     return {"ok": True}
@@ -1109,6 +1220,9 @@ def regrade_question(db, qid: int) -> None:
 def delete_question(qid: int, db=Depends(get_db)):
     if db.execute("SELECT 1 FROM exam_questions WHERE question_id = ?", (qid,)).fetchone():
         raise HTTPException(409, "這題已經被考試使用，請先從考試移除")
+    old = db.execute("SELECT * FROM questions WHERE id = ?", (qid,)).fetchone()
+    if old:
+        audit.note(f"#{qid} {item_name(old['tags'], old['stem'])}", {k: old[k] for k in QUESTION_LABELS}, target=f"題目 #{qid}")
     db.execute("DELETE FROM questions WHERE id = ?", (qid,))
     return {"ok": True}
 
@@ -1131,7 +1245,8 @@ def parse_csv_question(r: dict) -> QuestionIn:
                       points=float(r.get("points") or 1),
                       multi_mode=r.get("multi_mode") or "all", tags=r.get("tags", ""),
                       # weights 欄：各選項比重以 ; 分隔，例如 33.33;-16.67;33.33;33.33
-                      weights=[float(w) for w in (r.get("weights") or "").split(";") if w.strip()])
+                      weights=[float(w) for w in (r.get("weights") or "").split(";") if w.strip()],
+                      case_sensitive=str(r.get("case_sensitive", "")).strip().lower() in ("1", "true", "yes", "是"))
 
 
 @app.post("/api/admin/questions/import", dependencies=[admin])
@@ -1148,8 +1263,9 @@ def import_questions(body: CsvIn, db=Depends(get_db)):
     db.execute("BEGIN")
     db.executemany(
         "INSERT INTO questions (type, stem, code, options, answer, explanation, points, "
-        "multi_mode, tags, weights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+        "multi_mode, tags, weights, case_sensitive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
     db.execute("COMMIT")
+    audit.note(f"{len(values)} 題", {"題幹": [v[1][:60] for v in values][:300]})
     return {"ok": True, "count": len(values)}
 
 
@@ -1243,7 +1359,28 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     except Exception:
         db.execute("ROLLBACK")
         raise
+    audit.note(f"「{body.title.strip()}」", exam_snapshot(db, cur.lastrowid), target=f"考試 #{cur.lastrowid}")
     return {"ok": True, "id": cur.lastrowid}
+
+
+EXAM_LABELS = {
+    "title": "名稱", "start_at": "開放時間", "end_at": "關閉時間", "duration_min": "作答時間（分）",
+    "class_names": "開放班級", "shuffle_q": "題目打散", "shuffle_opt": "選項打散", "show_mode": "交卷後顯示",
+    "allowed_ips": "允許進場的 IP", "published": "學生看得到", "review_when": "成績公布", "review_at": "公布時間",
+    "allow_review": "可回頭複習", "review_until": "複習截止", "focus_mode": "離開畫面處理",
+    "focus_limit": "允許離開次數", "fullscreen": "全螢幕", "block_copy": "禁止複製", "questions": "題目（依序）",
+    "points": "配分",
+}
+
+
+def exam_snapshot(db, exam_id: int) -> dict:
+    """考試設定、題目順序與配分，給日誌比對修改前後用。"""
+    e = dict(exam_or_404(db, exam_id))
+    snap = {c.strip(): e[c.strip()] for c in EXAM_COLS.split(",")}
+    qs = exam_questions(db, exam_id)
+    snap["questions"] = [item_name(q["tags"], q["stem"]) for q in qs]
+    snap["points"] = [q["points"] for q in qs]
+    return snap
 
 
 @app.put("/api/admin/exams/{exam_id}", dependencies=[admin])
@@ -1257,6 +1394,7 @@ def update_exam(exam_id: int, body: ExamIn, db=Depends(get_db)):
             "SELECT question_id, points FROM exam_questions WHERE exam_id = ? AND points IS NOT NULL", (exam_id,))}
     if has_attempts and body.question_ids != current:
         raise HTTPException(409, "已經有學生作答，不能再改題目；其他設定可以改")
+    before = exam_snapshot(db, exam_id)
     db.execute("BEGIN")
     try:
         sets = ", ".join(f"{c.strip()} = ?" for c in EXAM_COLS.split(","))
@@ -1274,11 +1412,18 @@ def update_exam(exam_id: int, body: ExamIn, db=Depends(get_db)):
     except Exception:
         db.execute("ROLLBACK")
         raise
+    diff = audit.changes(before, exam_snapshot(db, exam_id), EXAM_LABELS)
+    audit.note(f"「{body.title.strip()}」" + ("：" + "、".join(diff) if diff else "（沒有變更）"),
+               diff, target=f"考試 #{exam_id}")
     return {"ok": True}
 
 
 @app.delete("/api/admin/exams/{exam_id}", dependencies=[admin])
 def delete_exam(exam_id: int, db=Depends(get_db)):
+    exam = db.execute("SELECT * FROM exams WHERE id = ?", (exam_id,)).fetchone()
+    if exam:
+        n = db.execute("SELECT COUNT(*) FROM attempts WHERE exam_id = ?", (exam_id,)).fetchone()[0]
+        audit.note(f"「{exam['title']}」，連同 {n} 份作答", exam_snapshot(db, exam_id), target=f"考試 #{exam_id}")
     db.execute("DELETE FROM exams WHERE id = ?", (exam_id,))
     return {"ok": True}
 
@@ -1343,6 +1488,7 @@ def csv_text(value) -> str:
 
 @app.get("/api/admin/exams/{exam_id}/results.csv", dependencies=[admin])
 def results_csv(exam_id: int, db=Depends(get_db)):
+    note_exam(db, exam_id)
     data = monitor(exam_id, db)
     qs = exam_questions(db, exam_id)
     per_q = {}
@@ -1392,7 +1538,7 @@ def exam_stats(exam_id: int, db=Depends(get_db)):
                     text = resp[i].strip() if i < len(resp) else ""
                     variants[i][text] = variants[i].get(text, 0) + 1
             item["fill_variants"] = [
-                sorted(({"text": t, "count": c, "accepted": fill_match(t, answer[i])}
+                sorted(({"text": t, "count": c, "accepted": fill_match(t, answer[i], bool(q["case_sensitive"]))}
                         for t, c in v.items()), key=lambda x: -x["count"])
                 for i, v in enumerate(variants)]
         else:
@@ -1567,6 +1713,8 @@ def store_seats(db, exam_id: int, grid: list[list[str]]) -> dict:
     exam = exam_or_404(db, exam_id)
     text = grid_text(grid)
     owner = seat_owner(db, exam)
+    audit.note(f"「{exam['title']}」{sum(1 for r in grid for c in r if c)} 個座位" + (f"（存到班級「{owner}」）" if owner else ""),
+               {"座位表": text}, target=f"考試 #{exam_id}")
     if owner:
         db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (text, owner))
         db.execute("UPDATE exams SET seat_map = '' WHERE id = ?", (exam_id,))
@@ -1735,12 +1883,19 @@ def exam_items(exam_id: int, db=Depends(get_db)):
             "max_score": sum(q["points"] for q in qs), "items": rows}
 
 
+def note_exam(db, exam_id: int) -> None:
+    exam = db.execute("SELECT title FROM exams WHERE id = ?", (exam_id,)).fetchone()
+    if exam:
+        audit.note(f"「{exam['title']}」", target=f"考試 #{exam_id}")
+
+
 def pct(v) -> str:
     return "" if v is None else f"{v * 100:.2f}%"
 
 
 @app.get("/api/admin/exams/{exam_id}/items.csv", dependencies=[admin])
 def exam_items_csv(exam_id: int, db=Depends(get_db)):
+    note_exam(db, exam_id)
     data = exam_items(exam_id, db)
     buf = io.StringIO()
     buf.write("\ufeff")
@@ -1816,12 +1971,14 @@ def set_grade_order(name: str, body: GradeOrderIn, db=Depends(get_db)):
         raise HTTPException(400, str(e))
     order = [sid for sid, _, _ in rows]
     db.execute("UPDATE classes SET grade_order = ? WHERE name = ?", (json.dumps(order), name))
+    audit.note(f"「{name}」{len(order)} 人，檔案 {body.filename}", {"學號順序": order}, target=f"班級 {name}")
     return grade_order_view(db, name)
 
 
 @app.delete("/api/admin/classes/{name}/grade-order", dependencies=[admin])
 def clear_grade_order(name: str, db=Depends(get_db)):
     class_or_404(db, name)
+    audit.note(f"「{name}」", target=f"班級 {name}")
     db.execute("UPDATE classes SET grade_order = '' WHERE name = ?", (name,))
     return grade_order_view(db, name)
 
@@ -1844,6 +2001,7 @@ def grade_order_view(db, name: str) -> dict:
 @app.get("/api/admin/exams/{exam_id}/grades.xlsx", dependencies=[admin])
 def export_grades_xlsx(exam_id: int, db=Depends(get_db)):
     """成績匯出成助教總表的格式：A 序號、C 學號、E 姓名、F 成績，第 8 列開始；學生順序照班級的成績總表。"""
+    note_exam(db, exam_id)
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     exam = exam_or_404(db, exam_id)
@@ -1926,6 +2084,8 @@ def accept_fill(qid: int, body: AcceptFillIn, db=Depends(get_db)):
         raise HTTPException(400, "空格編號或答案不正確")
     if body.text.strip() not in answer[body.blank]:
         answer[body.blank].append(body.text.strip())
+    audit.note(f"#{qid} {item_name(q['tags'], q['stem'])} 第 {body.blank + 1} 格加入「{body.text.strip()}」",
+               target=f"題目 #{qid}")
     db.execute("UPDATE questions SET answer = ? WHERE id = ?",
                (json.dumps(answer, ensure_ascii=False), qid))
     regrade_question(db, qid)
@@ -1938,19 +2098,31 @@ def unlock_attempt(attempt_id: int, db=Depends(get_db)):
         raise HTTPException(404, "找不到這份作答")
     db.execute("UPDATE attempts SET locked = 0 WHERE id = ?", (attempt_id,))
     log_event(db, attempt_id, "unlock")
+    note_attempt(db, attempt_id)
     return {"ok": True}
 
 
 @app.post("/api/admin/attempts/{attempt_id}/force-submit", dependencies=[admin])
 def force_submit(attempt_id: int, db=Depends(get_db)):
+    note_attempt(db, attempt_id)
     finalize(db, attempt_id, "force_submit")
     return {"ok": True}
 
 
 @app.delete("/api/admin/attempts/{attempt_id}", dependencies=[admin])
 def reset_attempt(attempt_id: int, db=Depends(get_db)):
+    note_attempt(db, attempt_id)
     db.execute("DELETE FROM attempts WHERE id = ?", (attempt_id,))
     return {"ok": True}
+
+
+def note_attempt(db, attempt_id: int) -> None:
+    a = db.execute("SELECT a.*, e.title, s.name FROM attempts a JOIN exams e ON e.id = a.exam_id "
+                   "LEFT JOIN students s ON s.student_id = a.student_id WHERE a.id = ?", (attempt_id,)).fetchone()
+    if a:
+        audit.note(f"「{a['title']}」{a['student_id']} {a['name'] or ''}",
+                   {"得分": a["score"], "交卷時間": a["submitted_at"], "離開畫面次數": a["tab_switches"]},
+                   target=f"考試 #{a['exam_id']}")
 
 
 # ── 靜態頁面 ──

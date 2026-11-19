@@ -13,6 +13,23 @@ CREATE TABLE IF NOT EXISTS students (
     password_hash TEXT NOT NULL DEFAULT ''  -- 空 = 尚未設定密碼，只輸入學號即可登入
 );
 
+-- 後台操作日誌（見 app/audit.py）
+CREATE TABLE IF NOT EXISTS admin_log (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      TEXT NOT NULL,
+    actor   TEXT NOT NULL,              -- 後台／系統指令
+    ip      TEXT NOT NULL DEFAULT '',
+    device  TEXT NOT NULL DEFAULT '',   -- 瀏覽器／作業系統
+    session TEXT NOT NULL DEFAULT '',   -- 登入工作階段代號（同一次登入相同）
+    action  TEXT NOT NULL,
+    target  TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    detail  TEXT NOT NULL DEFAULT '{}', -- JSON：修改前後的內容
+    status  INTEGER NOT NULL DEFAULT 200,
+    method  TEXT NOT NULL DEFAULT '',
+    path    TEXT NOT NULL DEFAULT ''
+);
+
 -- 班級：學生以 students.class_name 歸班；這裡放班級本身與座位表（同班每場考試共用）
 CREATE TABLE IF NOT EXISTS classes (
     name     TEXT PRIMARY KEY,
@@ -137,6 +154,7 @@ MIGRATIONS = [
     ("questions", "weights", "TEXT NOT NULL DEFAULT ''"),
     ("exam_questions", "points", "REAL"),          # 這場考試的配分；NULL = 用題庫預設配分
     ("classes", "grade_order", "TEXT NOT NULL DEFAULT ''"),  # 助教成績總表的學號順序（JSON），匯出時照這個順序
+    ("questions", "case_sensitive", "INTEGER NOT NULL DEFAULT 0"),  # 填充題比對是否區分大小寫（Moodle SHORTANSWER_C）
 ]
 
 

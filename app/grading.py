@@ -4,10 +4,10 @@ import unicodedata
 from fractions import Fraction
 
 
-def normalize(text: str) -> str:
-    # NFKC 會把全形英數、全形空白轉半形；再把連續空白壓成一個並轉小寫
-    text = unicodedata.normalize("NFKC", str(text)).strip()
-    return re.sub(r"\s+", " ", text).casefold()
+def normalize(text: str, fold: bool = True) -> str:
+    # NFKC 會把全形英數、全形空白轉半形；再把連續空白壓成一個，fold 時轉小寫
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(text)).strip())
+    return text.casefold() if fold else text
 
 
 # 只認一般小數與分數。Fraction 也吃 1e999999999 這種指數寫法，展開要算好幾小時，
@@ -25,13 +25,13 @@ def as_number(text: str):
         return None
 
 
-def fill_match(response: str, accepted: list[str]) -> bool:
-    got = normalize(response)
+def fill_match(response: str, accepted: list[str], case_sensitive: bool = False) -> bool:
+    got = normalize(response, not case_sensitive)
     if not got:
         return False
     got_num = as_number(got)
     for ans in accepted:
-        want = normalize(ans)
+        want = normalize(ans, not case_sensitive)
         if got == want:
             return True
         want_num = as_number(want)
@@ -41,7 +41,8 @@ def fill_match(response: str, accepted: list[str]) -> bool:
 
 
 def grade(qtype: str, answer, response, points: float,
-          multi_mode: str = "all", num_options: int = 0, weights: list[float] | None = None) -> float:
+          multi_mode: str = "all", num_options: int = 0, weights: list[float] | None = None,
+          case_sensitive: bool = False) -> float:
     """回傳這題得分；response 為 None 代表沒作答。"""
     if response is None:
         return 0.0
@@ -68,7 +69,7 @@ def grade(qtype: str, answer, response, points: float,
         per_blank = points / len(answer)
         hits = sum(
             1 for i, accepted in enumerate(answer)
-            if i < len(response) and fill_match(response[i], accepted)
+            if i < len(response) and fill_match(response[i], accepted, case_sensitive)
         )
         return round(per_blank * hits, 4)
     return 0.0

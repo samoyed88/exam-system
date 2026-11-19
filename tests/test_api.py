@@ -1012,3 +1012,56 @@ def test_grade_export_follows_gradebook_order(client):
     assert out.cell(7, 6).value.startswith("成績/")
     assert "不在成績總表上" in out.cell(12, 1).value and out.cell(13, 3).value == "10999"
     assert client.delete("/api/admin/classes/資管一乙/grade-order", headers=h).json()["count"] == 0
+
+
+# ── 區分大小寫的填充題 ──
+
+def test_fill_case_sensitive():
+    from app.grading import fill_match
+    assert fill_match("Double[] students", ["double[] students"]) is True
+    assert fill_match("Double[] students", ["double[] students"], case_sensitive=True) is False
+    assert fill_match(" double[]  students ", ["double[] students"], case_sensitive=True) is True
+    assert grade("fill", [["i<students.length", "i<3"]], ["i<3"], 3, case_sensitive=True) == 3
+
+
+# ── 操作日誌 ──
+
+def logs(client, h, **params):
+    return client.get("/api/admin/logs", params=params, headers=h).json()["rows"]
+
+
+def test_audit_log_records_admin_actions(client):
+    assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 401
+    h, exam_id = setup_exam(client)
+    rows = logs(client, h)
+    login_ok = [r for r in rows if r["action"] == "後台登入" and r["status"] == 200]
+    login_fail = [r for r in rows if r["action"] == "後台登入" and r["status"] == 401]
+    assert login_ok and login_fail and login_fail[0]["summary"] == "密碼錯誤"
+    # 這次登入之後的操作，工作階段代號和登入那筆相同
+    created = next(r for r in rows if r["action"] == "新增考試")
+    assert created["session"] and created["session"] == login_ok[0]["session"]
+    assert created["target"] == f"考試 #{exam_id}"
+    # 修改考試：記下改了哪些欄位的前後值
+    exam = client.get(f"/api/admin/exams/{exam_id}", headers=h).json()
+    exam.update(duration_min=45, question_points={"1": 20})
+    client.put(f"/api/admin/exams/{exam_id}", json=exam, headers=h)
+    upd = logs(client, h, action="修改考試")[0]
+    assert upd["detail"]["作答時間（分）"] == [30, 45]
+    assert upd["detail"]["配分"][1][0] == 20 and "作答時間" in upd["summary"]
+    # 下載成績也記錄；一般查詢與未登入的請求不記
+    client.get(f"/api/admin/exams/{exam_id}/results.csv", headers=h)
+    client.get(f"/api/admin/exams/{exam_id}/monitor", headers=h)
+    client.post("/api/admin/classes", json={"name": "x"})
+    actions = [r["action"] for r in logs(client, h)]
+    assert "下載成績 CSV" in actions and "新增班級" not in actions and not any("monitor" in a for a in actions)
+    # 刪除學生、解鎖、搜尋
+    client.post("/api/admin/students", json={"student_id": "S9", "name": "九"}, headers=h)
+    client.delete("/api/admin/students/S9", headers=h)
+    assert logs(client, h, q="S9")[0]["action"] == "刪除學生"
+    # 系統指令也能寫進日誌
+    from app import audit
+    from app.db import connect
+    conn = connect()
+    audit.write(conn, "匯入題目", "CH07.1-01～05 共 5 題")
+    conn.close()
+    assert logs(client, h)[0]["actor"] == "系統指令"
