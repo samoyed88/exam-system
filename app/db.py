@@ -74,6 +74,26 @@ CREATE TABLE IF NOT EXISTS answers (
     updated_at  TEXT NOT NULL,
     PRIMARY KEY (attempt_id, question_id)
 );
+
+-- 作答紀錄：start 進場、resume 重新進入、answer 作答、blur 離開畫面、focus 回到畫面、
+-- submit 交卷、auto_submit 時間到代交、force_submit 老師代交
+CREATE TABLE IF NOT EXISTS attempt_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id  INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    at          TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    question_id INTEGER,
+    detail      TEXT NOT NULL DEFAULT ''      -- answer 為作答 JSON，start/resume 為 IP 與電腦
+);
+CREATE INDEX IF NOT EXISTS attempt_log_attempt ON attempt_log (attempt_id, id);
+
+-- 每題停留秒數：學生端統計畫面停在該題且視窗在前景的時間，定時回報累加
+CREATE TABLE IF NOT EXISTS question_time (
+    attempt_id  INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+    question_id INTEGER NOT NULL,
+    seconds     REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (attempt_id, question_id)
+);
 """
 
 

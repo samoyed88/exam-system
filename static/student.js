@@ -16,6 +16,9 @@
   const queue = new Map();     // 尚未成功送出的作答：question_id → response
   let flushing = false;
   let saveTimer = null;
+  let viewing = null;          // 畫面中央的題目 id，用來累計每題停留時間
+  let dwell = {};              // 尚未回報的停留秒數：question_id → 秒
+  let dwellTicks = 0;
   const TYPE_TEXT = { single: '單選題', multi: '多選題', fill: '填充題' };
   const PROMPT = { single: '請選擇一個答案：', multi: '可選擇多個答案：', fill: '請在空格中填入答案：' };
 
@@ -275,6 +278,9 @@
       current.deadline = Date.now() + data.remaining_seconds * 1000;
       current.answers = Object.assign({}, data.saved);
       current.flags = new Set(JSON.parse(store('exam_flags_' + data.attempt_id) || '[]'));
+      viewing = data.questions.length ? data.questions[0].id : null;
+      dwell = {};
+      dwellTicks = 0;
       renderExam();
       show('take');
       tick();
@@ -363,6 +369,7 @@
       entries.forEach(en => {
         if (!en.isIntersecting) return;
         const id = en.target.id.slice(1);
+        viewing = +id;
         $$('[data-nav]').forEach(a => a.classList.toggle('current', a.dataset.nav === id));
       });
     }, { rootMargin: '-40% 0px -55% 0px' });
@@ -397,6 +404,7 @@
   function onAnswer(el) {
     const qid = +el.dataset.q;
     if (!qid) return;
+    viewing = qid;
     const q = current.questions.find(x => x.id === qid);
     let resp;
     if (q.type === 'single') {
@@ -456,10 +464,38 @@
     $('sum-timer').textContent = text;
     $('timer-box').classList.toggle('low', low);
     $('m-timer').classList.toggle('low', low);
+    countDwell();
     if (left <= 0) {
       clearInterval(timerId);
       finishExam(true);
     }
+  }
+
+  // 每秒記一次：作答畫面在前景時，算在畫面中央那一題；每 15 秒回報一次
+  function countDwell() {
+    if (document.hidden || !viewing || $('view-take').classList.contains('hidden')) return;
+    dwell[viewing] = (dwell[viewing] || 0) + 1;
+    if (++dwellTicks >= 15) sendDwell();
+  }
+
+  function sendDwell(keepalive) {
+    dwellTicks = 0;
+    if (!current || !Object.keys(dwell).length) return;
+    const seconds = dwell;
+    dwell = {};
+    const path = '/api/attempts/' + current.attempt_id + '/event';
+    if (keepalive) {
+      fetch(path, {
+        method: 'POST', keepalive: true,
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({ type: 'time', seconds }),
+      }).catch(() => {});
+      return;
+    }
+    // 送失敗就併回去下次再送
+    return call('POST', path, { type: 'time', seconds }).catch(() => {
+      for (const k in seconds) dwell[k] = (dwell[k] || 0) + seconds[k];
+    });
   }
 
   // ── 作答摘要 ──
@@ -503,6 +539,7 @@
       await flush();
       if (queue.size) await new Promise(r => setTimeout(r, 1500));
     }
+    await sendDwell();  // 交卷後伺服器就不再收停留時間，要先送完
     const attemptId = current.attempt_id;
     for (let i = 0; i < 10; i++) {
       try {
@@ -519,12 +556,12 @@
   }
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && current && !current.finishing) {
-      call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'blur' }).catch(() => {});
-    }
+    if (!current || current.finishing) return;
+    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: document.hidden ? 'blur' : 'focus' }).catch(() => {});
   });
   // 關分頁、切 App 時把還沒送出的作答用 keepalive 送出，瀏覽器關掉也會送完
   window.addEventListener('pagehide', () => {
+    if (current) sendDwell(true);
     if (!current || !queue.size) return;
     queue.forEach((resp, qid) => {
       fetch('/api/attempts/' + current.attempt_id + '/answers', {

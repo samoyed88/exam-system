@@ -363,6 +363,17 @@ tr.flagged td { background: #fff6f5; }
 .chart .val { font-size: 11px; fill: var(--text); font-weight: 600; }
 .chart .mark { fill: var(--brand); }
 .chart .mark.ng { fill: var(--ng); }
+.chart .mark.part { fill: #c98a1a; }
+.chart .mark.empty { fill: var(--border-strong); }
+.chart .avg { stroke: var(--text); stroke-width: 2; pointer-events: none; }
+.chart-legend .sw.part { background: #c98a1a; }
+.chart-legend .sw.empty { background: var(--border-strong); }
+.chart-legend .sw.avg { width: 14px; height: 0; border-top: 2px solid var(--text); border-radius: 0; vertical-align: 3px; background: none; }
+.timeline-ev.answer { color: var(--text); }
+.timeline-ev.change { color: var(--warn); font-weight: 600; }
+.timeline-ev.away { color: var(--ng); }
+.timeline-ev.sys { color: var(--brand); font-weight: 600; }
+a.link-cell { cursor: pointer; }
 .chart .mark.sel { stroke: var(--text); stroke-width: 2; }
 .chart .hit { fill: transparent; cursor: pointer; }
 .chart .hit:hover { fill: rgba(31, 95, 168, .06); }

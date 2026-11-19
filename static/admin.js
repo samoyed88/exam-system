@@ -1,7 +1,7 @@
 /* 老師後台：考試設定、考場監控、各題分析、題庫、名單 */
 (function () {
   'use strict';
-  const { store, api, esc, fmtTime, LETTERS } = window.exam;
+  const { store, api, esc, fmtTime, clock, LETTERS } = window.exam;
   const $ = id => document.getElementById(id);
 
   let token = store('exam_admin_token');
@@ -12,6 +12,13 @@
   let monitorExam = null;
   let monitorTimer = null;
   const TYPE_TEXT = { single: '單選', multi: '多選', fill: '填充' };
+
+  // 秒數 → 「12 分 05 秒」「48 秒」
+  function fmtSec(sec) {
+    if (sec == null) return '-';
+    const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+    return m ? m + ' 分 ' + String(s).padStart(2, '0') + ' 秒' : s + ' 秒';
+  }
 
   function call(method, path, body) {
     return api(method, path, body, token).catch(err => {
@@ -26,12 +33,12 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'questions', 'students'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
     if (view !== 'monitor') clearInterval(monitorTimer);
-    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams' }[view] || view;
+    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   }
 
@@ -244,10 +251,11 @@
       '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
       '<div><b>' + avg + '</b><span>平均分</span></div>';
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
-    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
+    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>用時</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
       data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
-        '<td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
+        '<td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
         '<td>' + status[r.status] + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
+        '<td>' + (r.attempt_id ? fmtSec(r.seconds) : '') + '</td>' +
         '<td>' + (r.score != null ? r.score + ' / ' + r.max_score : '') + '</td>' +
         '<td>' + esc(r.ip || '') + '</td><td>' + esc(r.device || '') + '</td><td>' + (r.tab_switches || '') + '</td>' +
         '<td>' + r.flags.map(esc).join('<br>') + '</td>' +
@@ -256,8 +264,14 @@
         '</td></tr>').join('');
   }
 
+  // 有作答的學生，姓名可點開個人作答紀錄
+  function nameCell(r) {
+    return r.attempt_id ? '<a href="#" class="link-cell" data-attempt="' + r.attempt_id + '" title="查看作答紀錄">' + esc(r.name) + '</a>' : esc(r.name);
+  }
+
   $('mon-table').addEventListener('click', async e => {
     const t = e.target;
+    if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'monitor'); return; }
     if (t.dataset.force && confirm('確定要替這位學生交卷？')) {
       await call('POST', '/api/admin/attempts/' + t.dataset.force + '/force-submit');
       refreshMonitor();
@@ -425,11 +439,11 @@
     const rows = filtered();
     $('sc-count').textContent = rows.length + ' / ' + scores.rows.length + ' 人';
     const pct = r => scores.max_score ? round1(r.score / scores.max_score * 100) : 0;
-    $('sc-table').innerHTML = '<tr><th style="width:70px">名次</th><th>學號</th><th>姓名</th><th>分數</th><th>百分制</th><th>交卷時間</th></tr>' +
-      (rows.map(r => '<tr><td>' + r.rank + '</td><td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
+    $('sc-table').innerHTML = '<tr><th style="width:70px">名次</th><th>學號</th><th>姓名</th><th>分數</th><th>百分制</th><th>用時</th><th>交卷時間</th></tr>' +
+      (rows.map(r => '<tr><td>' + r.rank + '</td><td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
         '<td class="' + (value(r) < sc.pass ? 'score-ng' : '') + '">' + fmtNum(r.score) + ' / ' + fmtNum(scores.max_score) + '</td>' +
-        '<td>' + pct(r) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td></tr>').join('') ||
-        '<tr><td colspan="6" class="muted">沒有符合的學生</td></tr>');
+        '<td>' + pct(r) + '</td><td>' + fmtSec(r.seconds) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td></tr>').join('') ||
+        '<tr><td colspan="7" class="muted">沒有符合的學生</td></tr>');
   }
 
   function renderQuestionChart() {
@@ -452,7 +466,8 @@
       const hit = el('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
       const stem = q.stem.length > 60 ? q.stem.slice(0, 60) + '…' : q.stem;
       hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + (i + 1) + ' 題　' + (q.rate == null ? '-' : Math.round(q.rate * 100) + '%') + '</b>' +
-        '<span class="muted">（' + TYPE_TEXT[q.type] + '・' + q.points + ' 分）</span><br>' + esc(stem)));
+        '<span class="muted">（' + TYPE_TEXT[q.type] + '・' + q.points + ' 分）</span><br>' + esc(stem) +
+        (q.avg_seconds != null ? '<br><span class="muted">平均停留 ' + fmtSec(q.avg_seconds) + '</span>' : '')));
       hit.addEventListener('mouseleave', e => tip(e, null));
       hit.addEventListener('click', e => { tip(e, null); loadStats(q.id); });
     });
@@ -507,6 +522,104 @@
     }
     say('sc-msg', '已複製 ' + rows.length + ' 人（可直接貼到 Excel）', true);
   });
+
+  $('sc-table').addEventListener('click', e => {
+    const t = e.target;
+    if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'scores'); }
+  });
+
+  // ── 個人作答紀錄 ──
+
+  let attemptFrom = 'monitor';
+  const EVENT_TEXT = {
+    start: ['開始作答', 'sys'], resume: ['重新進入考試頁', 'sys'], blur: ['離開考試畫面（切換視窗或分頁）', 'away'],
+    focus: ['回到考試畫面', 'answer'], submit: ['交卷', 'sys'], auto_submit: ['時間到，系統自動交卷', 'sys'],
+    force_submit: ['老師代為交卷', 'sys'],
+  };
+  const clockText = iso => {
+    const d = new Date(iso);
+    return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  };
+
+  $('attempt-back').addEventListener('click', () => attemptFrom === 'scores' ? loadScores() : openMonitor(monitorExam));
+  $('attempt-mon').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+
+  async function openAttempt(id, from) {
+    attemptFrom = from;
+    show('attempt');
+    tip(null, null);
+    $('attempt-from').innerHTML = from === 'scores' ? '成績統計 / ' : '';
+    const d = await call('GET', '/api/admin/attempts/' + id + '/log');
+    const a = d.attempt, qs = d.questions;
+    $('at-title').textContent = d.student.name + '（' + d.student.student_id + '）：' + d.exam.title;
+    const answered = qs.filter(q => q.response).length;
+    const changes = qs.reduce((n, q) => n + Math.max(0, q.saves - 1), 0);
+    const ended = d.timeline.filter(e => e.kind.endsWith('submit')).pop();
+    $('at-summary').innerHTML = [
+      [a.score != null ? fmtNum(a.score) + ' / ' + fmtNum(a.max_score) : '作答中', '得分'],
+      [fmtSec(a.seconds), '用時（限時 ' + d.exam.duration_min + ' 分）'],
+      [answered + ' / ' + qs.length, '已作答題數'],
+      [changes, '改答次數'],
+      [a.tab_switches, '離開畫面次數'],
+      [ended ? EVENT_TEXT[ended.kind][0] : '尚未交卷', '交卷方式'],
+      [(a.device || '-') + '　' + (a.ip || ''), '電腦　IP'],
+    ].map(([v, t]) => '<div><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+    renderDwellChart(qs);
+    const verdict = q => !q.response ? '<span class="badge gray">未作答</span>' : q.score >= q.points ? '<span class="badge ok">對</span>' :
+      q.score > 0 ? '<span class="badge warn">部分</span>' : '<span class="badge ng">錯</span>';
+    $('at-table').innerHTML = '<tr><th>題號</th><th>題型</th><th>題目</th><th>停留</th><th>全班平均</th><th>作答次數</th><th>最後答案</th><th>正解</th><th>得分</th></tr>' +
+      qs.map(q => '<tr><td>' + q.no + '</td><td>' + TYPE_TEXT[q.type] + '</td>' +
+        '<td title="' + esc(q.stem) + '">' + esc(q.stem.length > 28 ? q.stem.slice(0, 28) + '…' : q.stem) + '</td>' +
+        '<td>' + fmtSec(q.seconds) + '</td><td class="muted">' + fmtSec(q.avg_seconds) + '</td>' +
+        '<td>' + (q.saves > 1 ? '<b style="color:var(--warn)">' + q.saves + '</b>' : q.saves || '') + '</td>' +
+        '<td>' + esc(q.response) + '</td><td class="muted">' + esc(q.answer) + '</td>' +
+        '<td>' + verdict(q) + ' ' + (q.score != null ? fmtNum(q.score) : '') + '</td></tr>').join('');
+    const t0 = new Date(a.started_at);
+    $('at-timeline').innerHTML = '<tr><th style="width:90px">時間</th><th style="width:90px">經過</th><th>事件</th></tr>' +
+      d.timeline.map(e => {
+        const sec = Math.max(0, (new Date(e.at) - t0) / 1000);
+        let text, cls;
+        if (e.kind === 'answer') {
+          text = '第 ' + e.no + ' 題' + (e.change ? '改答為 ' : '作答 ') + (e.detail || '（清空）');
+          cls = e.change ? 'change' : 'answer';
+        } else {
+          [text, cls] = EVENT_TEXT[e.kind] || [e.kind, 'answer'];
+          if (e.detail) text += '（' + e.detail + '）';
+        }
+        return '<tr><td>' + clockText(e.at) + '</td><td class="muted">' + clock(sec) + '</td>' +
+          '<td class="timeline-ev ' + cls + '">' + esc(text) + '</td></tr>';
+      }).join('');
+  }
+
+  function renderDwellChart(qs) {
+    const box = $('at-chart');
+    if (!qs.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
+    const W = 760, H = 240, m = { t: 12, r: 12, b: 30, l: 48 };
+    const top = Math.max(10, ...qs.map(q => Math.max(q.seconds, q.avg_seconds || 0)));
+    const step = niceStep(top, 4), yMax = Math.ceil(top / step) * step;
+    const svg = frame(box, W, H, m, yMax, step, v => v >= 60 ? Math.round(v / 6) / 10 + ' 分' : v + ' 秒');
+    const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
+    const gap = Math.min(2, slot * .2), every = Math.ceil(qs.length / 25);
+    qs.forEach((q, i) => {
+      const x0 = m.l + slot * i + gap, w = Math.max(1, slot - gap * 2), h = ph * q.seconds / yMax;
+      const cls = !q.response ? ' empty' : q.score >= q.points ? '' : q.score > 0 ? ' part' : ' ng';
+      if (h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' + cls }, svg);
+      if (q.avg_seconds != null) {
+        const y = m.t + ph * (1 - q.avg_seconds / yMax);
+        el('line', { x1: x0, x2: x0 + w, y1: y, y2: y, class: 'avg' }, svg);
+      }
+      const last = i === qs.length - 1;
+      if (last || (i % every === 0 && qs.length - 1 - i >= every / 2))
+        el('text', { x: x0 + w / 2, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = q.no;
+      const hit = el('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
+      const stem = q.stem.length > 60 ? q.stem.slice(0, 60) + '…' : q.stem;
+      hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + q.no + ' 題　停留 ' + fmtSec(q.seconds) + '</b><br>' +
+        '<span class="muted">全班平均 ' + fmtSec(q.avg_seconds) + '・作答 ' + q.saves + ' 次・' +
+        (q.response ? '答 ' + esc(q.response) + '（' + fmtNum(q.score) + ' / ' + q.points + ' 分）' : '未作答') + '</span><br>' + esc(stem)));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+    });
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（這位學生看到的順序）';
+  }
 
   // ── 各題分析 ──
 

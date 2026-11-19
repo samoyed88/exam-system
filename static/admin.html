@@ -178,8 +178,34 @@
     </div>
     <div class="chart" id="sc-qchart"></div>
   </div>
-  <div class="chart-tip hidden" id="sc-tip"></div>
 </section>
+
+<!-- 個人作答紀錄 -->
+<section id="view-attempt" class="container wide hidden">
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="attempt-mon">考場監控</a> / <span id="attempt-from"></span>作答紀錄</div>
+  <div class="toolbar">
+    <h1 id="at-title"></h1>
+    <button class="btn ghost sm" id="attempt-back">← 返回</button>
+  </div>
+  <div class="summary" id="at-summary"></div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">每題停留時間</div>
+      <span class="muted">畫面停在該題、且考試視窗在前景的累計時間</span>
+    </div>
+    <div class="chart-legend"><span><i class="sw"></i>答對</span><span><i class="sw part"></i>部分得分</span><span><i class="sw ng"></i>答錯</span><span><i class="sw empty"></i>未作答</span><span><i class="sw avg"></i>全班平均</span></div>
+    <div class="chart" id="at-chart"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">每題明細 <span class="muted" style="font-weight:400">（題號依這位學生看到的順序；選項字母依題庫原本順序）</span></div>
+    <div class="table-wrap scroll-table"><table id="at-table"></table></div>
+  </div>
+  <div class="card">
+    <div class="card-title">作答時間軸</div>
+    <div class="table-wrap scroll-table"><table id="at-timeline"></table></div>
+  </div>
+</section>
+<div class="chart-tip hidden" id="sc-tip"></div>
 
 <!-- 各題分析 -->
 <section id="view-stats" class="container wide hidden">

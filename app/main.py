@@ -146,8 +146,15 @@ def score_answer(q: sqlite3.Row, response) -> float:
                  q["multi_mode"], len(json.loads(q["options"])))
 
 
-def finalize(db, attempt_id: int) -> None:
-    """交卷並評分；已交卷就不動，可重複呼叫。"""
+def log_event(db, attempt_id: int, kind: str, question_id: int | None = None,
+              detail: str = "", at: datetime | None = None) -> None:
+    db.execute("INSERT INTO attempt_log (attempt_id, at, kind, question_id, detail) "
+               "VALUES (?, ?, ?, ?, ?)",
+               (attempt_id, (at or now()).isoformat(), kind, question_id, detail))
+
+
+def finalize(db, attempt_id: int, kind: str = "auto_submit") -> None:
+    """交卷並評分；已交卷就不動，可重複呼叫。kind 記在作答紀錄：submit / auto_submit / force_submit。"""
     attempt = db.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
     if not attempt or attempt["submitted_at"]:
         return
@@ -172,6 +179,7 @@ def finalize(db, attempt_id: int) -> None:
             "UPDATE attempts SET submitted_at = ?, score = ?, max_score = ? "
             "WHERE id = ? AND submitted_at IS NULL",
             (now().isoformat(), round(total, 2), round(max_total, 2), attempt_id))
+        log_event(db, attempt_id, kind)
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -269,7 +277,8 @@ class AnswerIn(BaseModel):
 
 
 class EventIn(BaseModel):
-    type: str
+    type: str                           # blur / focus / time
+    seconds: dict[int, float] = {}      # time：題目 id → 這段期間停留的秒數
 
 
 @app.get("/api/health")
@@ -429,19 +438,26 @@ def start_exam(exam_id: int, body: StartIn, request: Request,
         if end and end < deadline:
             deadline = end.astimezone(timezone.utc)  # 一律存 UTC，finalize_expired 才比得準
         try:
-            db.execute(
+            cur = db.execute(
                 "INSERT INTO attempts (exam_id, student_id, started_at, deadline, ip, device) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (exam_id, sid, started.isoformat(), deadline.isoformat(), ip, body.device[:40]))
+            log_event(db, cur.lastrowid, "start", detail=device_text(ip, body.device), at=started)
         except sqlite3.IntegrityError:
             pass  # 同一學生兩個分頁同時按開始，另一個已建好
         attempt = db.execute("SELECT * FROM attempts WHERE exam_id = ? AND student_id = ?",
                              (exam_id, sid)).fetchone()
-    elif body.device and body.device != attempt["device"]:
-        # 換電腦接續作答：記下最後使用的電腦與 IP，後台看得到
-        db.execute("UPDATE attempts SET device = ?, ip = ? WHERE id = ?",
-                   (body.device[:40], ip, attempt["id"]))
+    else:
+        # 重新整理、換電腦接續作答都會到這裡；換電腦時記下最後使用的電腦與 IP，後台看得到
+        if body.device and body.device != attempt["device"]:
+            db.execute("UPDATE attempts SET device = ?, ip = ? WHERE id = ?",
+                       (body.device[:40], ip, attempt["id"]))
+        log_event(db, attempt["id"], "resume", detail=device_text(ip, body.device))
     return attempt_payload(db, exam, attempt)
+
+
+def device_text(ip: str, device: str) -> str:
+    return f"IP {ip}" + (f"，電腦 {device[:40]}" if device else "")
 
 
 def own_attempt(db, attempt_id: int, sid: str) -> sqlite3.Row:
@@ -481,7 +497,7 @@ def save_answer(attempt_id: int, body: AnswerIn, request: Request,
         raise HTTPException(409, "已經交卷，無法再修改")
     require_exam_ip(db, attempt, request)
     if now() > datetime.fromisoformat(attempt["deadline"]) + timedelta(seconds=GRACE_SECONDS):
-        finalize(db, attempt_id)
+        finalize(db, attempt_id, "auto_submit")
         raise HTTPException(409, "作答時間已到，系統已自動交卷")
     q = db.execute(
         "SELECT q.* FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
@@ -497,12 +513,23 @@ def save_answer(attempt_id: int, body: AnswerIn, request: Request,
                       (attempt_id,)).fetchone()["submitted_at"]:
             db.execute("ROLLBACK")
             raise HTTPException(409, "已經交卷，無法再修改")
+        text = json.dumps(body.response, ensure_ascii=False)
+        t = now()
         db.execute(
             "INSERT INTO answers (attempt_id, question_id, response, updated_at) "
             "VALUES (?, ?, ?, ?) ON CONFLICT (attempt_id, question_id) DO UPDATE SET "
             "response = excluded.response, updated_at = excluded.updated_at",
-            (attempt_id, q["id"], json.dumps(body.response, ensure_ascii=False),
-             now().isoformat()))
+            (attempt_id, q["id"], text, t.isoformat()))
+        # 填充題邊打字邊存、多選題連續勾選，15 秒內同一題併成一筆，紀錄才看得出真正改了幾次
+        last = db.execute("SELECT id, kind, question_id, at FROM attempt_log "
+                          "WHERE attempt_id = ? ORDER BY id DESC LIMIT 1", (attempt_id,)).fetchone()
+        if (q["type"] != "single" and last and last["kind"] == "answer"
+                and last["question_id"] == q["id"]
+                and t - datetime.fromisoformat(last["at"]) < timedelta(seconds=15)):
+            db.execute("UPDATE attempt_log SET detail = ?, at = ? WHERE id = ?",
+                       (text, t.isoformat(), last["id"]))
+        else:
+            log_event(db, attempt_id, "answer", q["id"], text, at=t)
         db.execute("COMMIT")
     except HTTPException:
         raise
@@ -516,9 +543,23 @@ def save_answer(attempt_id: int, body: AnswerIn, request: Request,
 def attempt_event(attempt_id: int, body: EventIn,
                   sid: str = Depends(current_student), db=Depends(get_db)):
     attempt = own_attempt(db, attempt_id, sid)
-    if body.type == "blur" and not attempt["submitted_at"]:
+    if attempt["submitted_at"]:
+        return {"ok": True}
+    if body.type == "blur":
         db.execute("UPDATE attempts SET tab_switches = tab_switches + 1 WHERE id = ?",
                    (attempt_id,))
+        log_event(db, attempt_id, "blur")
+    elif body.type == "focus":
+        log_event(db, attempt_id, "focus")
+    elif body.type == "time":
+        qids = {r[0] for r in db.execute("SELECT question_id FROM exam_questions WHERE exam_id = ?",
+                                         (attempt["exam_id"],))}
+        # 學生端每 15 秒回報一次；單題超過 120 秒視為異常（重送或竄改），不採計
+        for qid, sec in body.seconds.items():
+            if qid in qids and 0 < sec <= 120:
+                db.execute("INSERT INTO question_time (attempt_id, question_id, seconds) VALUES (?, ?, ?) "
+                           "ON CONFLICT (attempt_id, question_id) DO UPDATE SET "
+                           "seconds = seconds + excluded.seconds", (attempt_id, qid, sec))
     return {"ok": True}
 
 
@@ -571,7 +612,7 @@ def submit_attempt(attempt_id: int, request: Request,
     attempt = own_attempt(db, attempt_id, sid)
     if not attempt["submitted_at"]:
         require_exam_ip(db, attempt, request)
-    finalize(db, attempt_id)
+    finalize(db, attempt_id, "submit")
     attempt = own_attempt(db, attempt_id, sid)
     # 交卷後 2 分鐘內算「交卷當下」，一定給看詳解（若老師開放且已公布）；之後依複習設定。
     # 用時間判斷而不是「這次才交」，因為時間到可能是伺服器先代交、瀏覽器隨後才送來
@@ -994,6 +1035,7 @@ def monitor(exam_id: int, db=Depends(get_db)):
                 "tab_switches": a["tab_switches"], "started_at": a["started_at"],
                 "submitted_at": a["submitted_at"],
                 "status": "submitted" if a["submitted_at"] else "in_progress"})
+            row["seconds"] = used_seconds(row)
             if a["device"] and len(devices[a["device"]]) > 1:
                 others = [o for o in devices[a["device"]] if o != sid]
                 row["flags"].append(f"同一台電腦也登入：{'、'.join(others)}")
@@ -1095,7 +1137,8 @@ def exam_scores(exam_id: int, db=Depends(get_db)):
         # 同分同名次
         rank = rows[-1]["rank"] if rows and rows[-1]["score"] == r["score"] else len(rows) + 1
         rows.append({"student_id": r["student_id"], "name": r["name"], "score": r["score"],
-                     "rank": rank, "submitted_at": r["submitted_at"]})
+                     "rank": rank, "submitted_at": r["submitted_at"],
+                     "attempt_id": r["attempt_id"], "seconds": used_seconds(r)})
     vals = sorted(r["score"] for r in rows)
     summary = {"count": len(vals),
                "absent": sum(1 for r in data["rows"] if r["status"] == "absent"),
@@ -1113,12 +1156,94 @@ def exam_scores(exam_id: int, db=Depends(get_db)):
         "JOIN attempts a ON a.id = ans.attempt_id "
         "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL GROUP BY ans.question_id",
         (exam_id,))}
+    dwell = {r["question_id"]: r["avg"] for r in db.execute(
+        "SELECT qt.question_id, AVG(qt.seconds) AS avg FROM question_time qt "
+        "JOIN attempts a ON a.id = qt.attempt_id "
+        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL GROUP BY qt.question_id", (exam_id,))}
     questions = [{"id": q["id"], "type": q["type"], "stem": q["stem"], "points": q["points"],
                   "rate": round((earned.get(q["id"]) or 0) / (q["points"] * len(vals)), 3)
-                  if vals and q["points"] else None}
+                  if vals and q["points"] else None,
+                  "avg_seconds": round(dwell[q["id"]]) if q["id"] in dwell else None}
                  for q in qs]
     return {"exam": {"id": exam_id, "title": data["exam"]["title"]}, "max_score": max_score,
             "summary": summary, "rows": rows, "questions": questions}
+
+
+def used_seconds(row) -> int | None:
+    """作答用時：開始到交卷；還在作答就算到現在。"""
+    if not row.get("started_at"):
+        return None
+    end = datetime.fromisoformat(row["submitted_at"]) if row.get("submitted_at") else now()
+    return max(0, int((end - datetime.fromisoformat(row["started_at"])).total_seconds()))
+
+
+LETTERS = "ABCDEF"
+
+
+def response_text(q: sqlite3.Row, response) -> str:
+    """後台顯示用：選擇題用題庫原本的選項字母（和各題分析一致），填充題用 / 分隔各格。"""
+    if response is None or response == []:
+        return ""
+    if q["type"] == "fill":
+        return " / ".join(s.strip() or "（空白）" for s in response)
+    picks = response if isinstance(response, list) else [response]
+    return "、".join(LETTERS[i] if i < len(LETTERS) else str(i + 1) for i in picks)
+
+
+@app.get("/api/admin/attempts/{attempt_id}/log", dependencies=[admin])
+def attempt_log(attempt_id: int, db=Depends(get_db)):
+    attempt = db.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+    if not attempt:
+        raise HTTPException(404, "找不到這份作答")
+    exam = exam_or_404(db, attempt["exam_id"])
+    student = db.execute("SELECT * FROM students WHERE student_id = ?",
+                         (attempt["student_id"],)).fetchone()
+    # 依這位學生看到的順序編題號，和學生畫面上的「第幾題」對得上
+    qs = student_questions(db, exam, attempt["student_id"])
+    number = {q["id"]: n + 1 for n, q in enumerate(qs)}
+    times = {r["question_id"]: r["seconds"] for r in db.execute(
+        "SELECT question_id, seconds FROM question_time WHERE attempt_id = ?", (attempt_id,))}
+    class_avg = {r["question_id"]: r["avg"] for r in db.execute(
+        "SELECT qt.question_id, AVG(qt.seconds) AS avg FROM question_time qt "
+        "JOIN attempts a ON a.id = qt.attempt_id WHERE a.exam_id = ? GROUP BY qt.question_id",
+        (exam["id"],))}
+    saved = {r["question_id"]: r for r in db.execute(
+        "SELECT * FROM answers WHERE attempt_id = ?", (attempt_id,))}
+    events = db.execute("SELECT * FROM attempt_log WHERE attempt_id = ? ORDER BY at, id",
+                        (attempt_id,)).fetchall()
+    by_id = {q["id"]: q for q in qs}
+    saves: dict[int, int] = {}
+    timeline = []
+    for e in events:
+        item = {"at": e["at"], "kind": e["kind"], "detail": e["detail"]}
+        q = by_id.get(e["question_id"])
+        if e["kind"] == "answer":
+            if not q:
+                continue  # 題目已從考試移除
+            saves[q["id"]] = saves.get(q["id"], 0) + 1
+            item.update(no=number[q["id"]], detail=response_text(q, json.loads(e["detail"])),
+                        change=saves[q["id"]] > 1)
+        timeline.append(item)
+    questions = []
+    for q in qs:
+        a = saved.get(q["id"])
+        answer = json.loads(q["answer"])
+        questions.append({
+            "no": number[q["id"]], "id": q["id"], "type": q["type"], "stem": q["stem"],
+            "points": q["points"], "seconds": round(times.get(q["id"], 0)),
+            "avg_seconds": round(class_avg[q["id"]]) if q["id"] in class_avg else None,
+            "saves": saves.get(q["id"], 0),
+            "response": response_text(q, json.loads(a["response"])) if a else "",
+            "answer": " / ".join(b[0] for b in answer) if q["type"] == "fill"
+            else response_text(q, answer),
+            "score": a["score"] if a else None})
+    return {"exam": {"id": exam["id"], "title": exam["title"],
+                     "duration_min": exam["duration_min"]},
+            "student": {"student_id": attempt["student_id"],
+                        "name": student["name"] if student else "",
+                        "class_name": student["class_name"] if student else ""},
+            "attempt": {**dict(attempt), "seconds": used_seconds(dict(attempt))},
+            "questions": questions, "timeline": timeline}
 
 
 @app.post("/api/admin/questions/{qid}/accept-fill", dependencies=[admin])
@@ -1139,7 +1264,7 @@ def accept_fill(qid: int, body: AcceptFillIn, db=Depends(get_db)):
 
 @app.post("/api/admin/attempts/{attempt_id}/force-submit", dependencies=[admin])
 def force_submit(attempt_id: int, db=Depends(get_db)):
-    finalize(db, attempt_id)
+    finalize(db, attempt_id, "force_submit")
     return {"ok": True}
 
 

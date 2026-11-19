@@ -546,3 +546,78 @@ def test_csv_formula_injection_escaped(client):
     client.post(f"/api/exams/{exam_id}/start", json={"device": '=HYPERLINK("http://e/","x")'}, headers=s)
     text = client.get(f"/api/admin/exams/{exam_id}/results.csv", headers=h).text
     assert "'=HYPERLINK" in text and ',"=HYPERLINK' not in text
+
+
+# ── 作答紀錄與停留時間 ──
+
+def test_attempt_log_records_answers_and_events(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    started = client.post(f"/api/exams/{exam_id}/start", json={"device": "A01"}, headers=s).json()
+    aid = started["attempt_id"]
+    by_type = {q["type"]: q for q in started["questions"]}
+    single = by_type["single"]
+    put = lambda q, resp: client.put(f"/api/attempts/{aid}/answers",
+                                     json={"question_id": q["id"], "response": resp}, headers=s)
+    put(single, 0)
+    put(single, 1)                      # 單選改答：另記一筆
+    fill = by_type["fill"]
+    blanks = fill["blanks"]
+    put(fill, ["臺"] + [""] * (blanks - 1))
+    put(fill, ["臺北"] + [""] * (blanks - 1))   # 邊打字邊存：併成一筆
+    client.post(f"/api/attempts/{aid}/event", json={"type": "blur"}, headers=s)
+    client.post(f"/api/attempts/{aid}/event", json={"type": "focus"}, headers=s)
+    client.post(f"/api/exams/{exam_id}/start", json={"device": "A01"}, headers=s)  # 重新整理
+    client.post(f"/api/attempts/{aid}/submit", headers=s)
+
+    log = client.get(f"/api/admin/attempts/{aid}/log", headers=h).json()
+    kinds = [e["kind"] for e in log["timeline"]]
+    assert kinds == ["start", "answer", "answer", "answer", "blur", "focus", "resume", "submit"]
+    answers = [e for e in log["timeline"] if e["kind"] == "answer"]
+    assert [e["change"] for e in answers] == [False, True, False]
+    assert answers[2]["detail"].startswith("臺北")
+    rows = {q["id"]: q for q in log["questions"]}
+    assert rows[single["id"]]["saves"] == 2 and rows[fill["id"]]["saves"] == 1
+    assert rows[single["id"]]["response"] == "B"
+    assert log["attempt"]["tab_switches"] == 1 and log["attempt"]["seconds"] >= 0
+    # 題號依學生看到的順序
+    assert [q["id"] for q in log["questions"]] == [q["id"] for q in started["questions"]]
+
+
+def test_question_time_reported_and_validated(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    started = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()
+    aid = started["attempt_id"]
+    q1, q2 = started["questions"][0]["id"], started["questions"][1]["id"]
+    ev = lambda sec: client.post(f"/api/attempts/{aid}/event", json={"type": "time", "seconds": sec}, headers=s)
+    assert ev({q1: 15}).status_code == 200
+    ev({q1: 10, q2: 5})
+    ev({q2: 9999, 999: 10, q1: -5})     # 超過上限、不在考卷上的題目、負數：都不採計
+    client.post(f"/api/attempts/{aid}/submit", headers=s)
+    ev({q1: 30})                        # 交卷後不再累加
+
+    rows = {q["id"]: q for q in client.get(f"/api/admin/attempts/{aid}/log", headers=h).json()["questions"]}
+    assert rows[q1]["seconds"] == 25 and rows[q2]["seconds"] == 5
+    assert rows[q1]["avg_seconds"] == 25
+    sc = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert sc["rows"][0]["attempt_id"] == aid and sc["rows"][0]["seconds"] >= 0
+    assert {q["id"]: q["avg_seconds"] for q in sc["questions"]}[q1] == 25
+
+
+def test_attempt_log_auto_submit_force_and_reset(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    client.post(f"/api/admin/attempts/{aid}/force-submit", headers=h)
+    kinds = [e["kind"] for e in client.get(f"/api/admin/attempts/{aid}/log", headers=h).json()["timeline"]]
+    assert kinds == ["start", "force_submit"]
+    # 學生看不到別人的紀錄、也沒有後台權限
+    assert client.get(f"/api/admin/attempts/{aid}/log", headers=s).status_code == 401
+    # 重考會連同紀錄一起刪掉
+    client.delete(f"/api/admin/attempts/{aid}", headers=h)
+    assert client.get(f"/api/admin/attempts/{aid}/log", headers=h).status_code == 404
+    from app.db import connect
+    conn = connect()
+    assert conn.execute("SELECT COUNT(*) FROM attempt_log").fetchone()[0] == 0
+    conn.close()
