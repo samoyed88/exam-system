@@ -1,19 +1,22 @@
 """考試系統後端：學生以學號進場作答，老師後台管理名單、題庫、考試與成績。"""
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
 import random
+import re
 import sqlite3
 import statistics
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import URL, Headers, MutableHeaders
 from pydantic import BaseModel
@@ -83,6 +86,10 @@ class SecurityMiddleware:
                 out.update(SECURITY_HEADERS)
                 if path.startswith("/api/"):
                     out["Cache-Control"] = "no-store"  # 考場電腦共用，成績與作答不要留在快取
+                elif "Cache-Control" not in out:
+                    # 頁面引用的 CSS/JS 帶 ?v=內容雜湊，可以放心長期快取；其他靜態檔每次向伺服器確認
+                    versioned = scope.get("query_string", b"").startswith(b"v=")
+                    out["Cache-Control"] = "public, max-age=31536000, immutable" if versioned else "no-cache"
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -1277,14 +1284,36 @@ def reset_attempt(attempt_id: int, db=Depends(get_db)):
 # ── 靜態頁面 ──
 
 
+# Cloudflare 對沒有快取設定的 CSS/JS 預設讓瀏覽器快取 4 小時，改版後老師、學生會拿到舊檔。
+# 頁面裡的 CSS/JS 網址加上內容雜湊（/style.css?v=ab12cd），檔案一改網址就變；頁面本身每次都重新驗證。
+ASSET_REF = re.compile(r'(src|href)="/([\w.-]+\.(?:css|js))"')
+
+
+@lru_cache(maxsize=None)
+def render_page(name: str) -> str:
+    def versioned(m: re.Match) -> str:
+        digest = hashlib.sha256((STATIC_DIR / m[2]).read_bytes()).hexdigest()[:10]
+        return f'{m[1]}="/{m[2]}?v={digest}"'
+    return ASSET_REF.sub(versioned, (STATIC_DIR / name).read_text(encoding="utf-8"))
+
+
+def page(name: str) -> HTMLResponse:
+    return HTMLResponse(render_page(name), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/", include_in_schema=False)
+def student_page():
+    return page("index.html")
+
+
 @app.get("/admin", include_in_schema=False)
 def admin_page():
-    return FileResponse(STATIC_DIR / "admin.html")
+    return page("admin.html")
 
 
 @app.get("/setup", include_in_schema=False)
 def setup_page():
-    return FileResponse(STATIC_DIR / "setup.html")
+    return page("setup.html")
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

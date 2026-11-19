@@ -621,3 +621,15 @@ def test_attempt_log_auto_submit_force_and_reset(client):
     conn = connect()
     assert conn.execute("SELECT COUNT(*) FROM attempt_log").fetchone()[0] == 0
     conn.close()
+
+
+def test_pages_use_versioned_assets(client):
+    import re
+    for path in ("/", "/admin", "/setup"):
+        r = client.get(path)
+        assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+        refs = re.findall(r'(?:src|href)="(/[\w.-]+\.(?:css|js)[^"]*)"', r.text)
+        assert refs and all("?v=" in ref for ref in refs)
+    ref = re.search(r'href="(/style\.css\?v=\w+)"', client.get("/admin").text)[1]
+    assert "immutable" in client.get(ref).headers["cache-control"]
+    assert client.get("/style.css").headers["cache-control"] == "no-cache"
