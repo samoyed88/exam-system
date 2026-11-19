@@ -356,6 +356,9 @@
       'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z';
   }
 
+  // 長條寬度約佔每格 60%，中間留空隙；題數少時不超過 40px
+  const barWidth = slot => Math.max(2, Math.min(40, slot * .6));
+
   function niceStep(max, ticks) {
     const raw = max / ticks, p = Math.pow(10, Math.floor(Math.log10(raw)));
     return [1, 2, 5, 10].map(m => m * p).find(s => s >= raw);
@@ -394,7 +397,8 @@
     const pw = W - m.l - m.r, ph = H - m.t - m.b, max = scaleMax();
     const x = v => m.l + pw * v / max;
     bs.forEach(b => {
-      const x0 = x(b.a) + 1, x1 = x(b.b) - 1, h = ph * b.rows.length / yMax;
+      const pad = (x(b.b) - x(b.a)) * .18;  // 長條之間留白，不要滿版
+      const x0 = x(b.a) + pad, x1 = x(b.b) - pad, h = ph * b.rows.length / yMax;
       const below = b.last ? b.b < sc.pass : b.b <= sc.pass;
       const selected = sc.mode === 'range' && sc.a === b.a && sc.b === b.b;
       if (b.rows.length) el('path', { d: barPath(x0, m.t + ph - h, Math.max(1, x1 - x0), h), class: 'mark' + (below ? ' ng' : '') + (selected ? ' sel' : '') }, svg);
@@ -454,10 +458,9 @@
     const W = 760, H = 220, m = { t: 12, r: 12, b: 30, l: 40 };
     const svg = frame(box, W, H, m, 100, 25, v => v + '%');
     const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
-    const gap = Math.min(2, slot * .2);
     const every = Math.ceil(qs.length / 25);
     qs.forEach((q, i) => {
-      const x0 = m.l + slot * i + gap, w = Math.max(1, slot - gap * 2);
+      const w = barWidth(slot), x0 = m.l + slot * i + (slot - w) / 2;
       const rate = q.rate || 0, h = ph * rate;
       if (q.rate != null && h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' }, svg);
       const last = i === qs.length - 1;
@@ -601,9 +604,9 @@
     const yMax = Math.ceil(top / step) * step;
     const svg = frame(box, W, H, m, yMax, step, v => v < 60 ? v + ' 秒' : v % 60 ? Math.floor(v / 60) + ' 分 ' + v % 60 + ' 秒' : v / 60 + ' 分');
     const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
-    const gap = Math.min(2, slot * .2), every = Math.ceil(qs.length / 25);
+    const every = Math.ceil(qs.length / 25);
     qs.forEach((q, i) => {
-      const x0 = m.l + slot * i + gap, w = Math.max(1, slot - gap * 2), h = ph * q.seconds / yMax;
+      const w = barWidth(slot), x0 = m.l + slot * i + (slot - w) / 2, h = ph * q.seconds / yMax;
       const cls = !q.response ? ' empty' : q.score >= q.points ? '' : q.score > 0 ? ' part' : ' ng';
       if (h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' + cls }, svg);
       if (q.avg_seconds != null) {

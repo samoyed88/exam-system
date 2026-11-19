@@ -224,7 +224,7 @@
       if (st === 'in_progress') action = '<button class="btn" data-start="' + ex.id + '">繼續作答</button>';
       if (st === 'submitted') action = '<button class="btn ghost" data-result="' + ex.attempt.id + '">查看成績</button>';
       if (st === 'submitted_wait') action = '<button class="btn ghost" data-result="' + ex.attempt.id + '">查看交卷紀錄</button>';
-      return '<div class="card exam-card"><div class="exam-icon">📝</div><div class="body">' +
+      return '<div class="card exam-card"><div class="exam-icon">卷</div><div class="body">' +
         '<div class="row"><h2>' + esc(ex.title) + '</h2>' + BADGE[st] + '</div>' +
         '<div class="exam-meta">' +
         '<span>題數 <b>' + ex.question_count + '</b> 題</span>' +
