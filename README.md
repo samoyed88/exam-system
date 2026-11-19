@@ -24,7 +24,7 @@ set -a; source .env; set +a
 ```bash
 git clone <repo> exam && cd exam   # 之後更新用 git pull
 cp .env.example .env               # 填 ADMIN_PASSWORD、SECRET_KEY、IP_HEADER 等
-docker compose up -d --build       # 只開 app，http://localhost:8000
+docker compose up -d --build       # 只開 app，http://localhost:8000（.env 的 APP_PORT 可改）
 ```
 
 對外公開二選一：
@@ -36,6 +36,16 @@ docker compose up -d --build       # 只開 app，http://localhost:8000
 
 Cloudflare Tunnel：在 Cloudflare Zero Trust 建一個 tunnel，Public Hostname 設 `exam.你的網域` → Service `http://app:8000`，把 token 貼到 `.env`。
 
+也可以用 CLI 建（不用進 Dashboard，compose 已用 `TUNNEL_URL` 指到 `app:8000`）：
+
+```bash
+cloudflared tunnel create exam-system
+cloudflared tunnel route dns exam-system exam.你的網域
+cloudflared tunnel token exam-system     # 輸出貼到 .env 的 TUNNEL_TOKEN
+```
+
+若 `~/.cloudflared/config.yml` 裡已有別的 `tunnel:`，`route dns` 會被它蓋過而綁錯 tunnel，要另建一個只寫 `tunnel: <UUID>` 的設定檔，用 `--config` 指定它（`/dev/null` 會被拒絕）。
+
 更新版本：
 
 ```bash
@@ -43,10 +53,20 @@ git pull
 docker compose --profile tunnel up -d --build   # 依你用的 profile
 ```
 
-備份（考前考後各一次，平常每日）：
+備份（考前考後各一次，平常每日）。要在容器裡做，不要從主機直接開 `data/exam.db`（Docker Desktop 的掛載資料夾不支援跨系統共用 SQLite 鎖）：
 
 ```bash
-sqlite3 data/exam.db ".backup data/backup-$(date +%Y%m%d-%H%M).db"
+docker compose exec app python -c "import sqlite3,time; sqlite3.connect('/app/data/exam.db').backup(sqlite3.connect(time.strftime('/app/data/backup-%Y%m%d-%H%M.db')))"
+```
+
+壓力測試（考前確認主機撐得住；會建立測試學生與考試，請對另開的測試容器執行，不要打正式站）：
+
+```bash
+docker build -t exam-loadtest . && docker run -d --rm --name exam-loadtest -p 127.0.0.1:8013:8000 \
+  -e ADMIN_PASSWORD=loadtest -e SECRET_KEY=$(python3 -c "import secrets;print(secrets.token_hex(32))") exam-loadtest
+.venv/bin/python scripts/loadtest.py --url http://127.0.0.1:8013 --password loadtest \
+  --students 100 --questions static/samples/questions.csv          # 加 --auto-submit 測時間到代交
+docker stop exam-loadtest
 ```
 
 ## IP 設定很重要
@@ -58,6 +78,14 @@ sqlite3 data/exam.db ".backup data/backup-$(date +%Y%m%d-%H%M).db"
 - 空白：直連（本機開發）
 
 設錯的話，考場 IP 白名單要嘛擋掉所有人，要嘛可以被學生偽造 header 繞過。部署後到後台按「加入我現在的 IP」，確認顯示的是學校的對外 IP。
+
+## 資安注意事項
+
+- **正式考試請設定「允許進場的 IP」**：學生預設只要學號就能登入，學號通常是連號，知道學號的人就能冒名作答。設了 IP 白名單後，開始作答、存答案、交卷都必須在考場網路。
+- 後台密碼錯 10 次會鎖該 IP 15 分鐘；學生密碼錯 5 次會鎖「該 IP＋學號」5 分鐘；同一 IP 5 分鐘內輸入 60 個不存在的學號會被暫擋。鎖定紀錄存在記憶體，重啟容器即清除。
+- 學生改密碼或老師重設密碼，該學生舊的登入立即失效；更換 `ADMIN_PASSWORD` 後老師需重新登入。
+- 有安全標頭（CSP、禁止被 iframe 嵌入），經 Cloudflare 的 http 連線會自動轉到 https。
+- 成績 CSV 會把 `= + - @` 開頭的欄位前面加 `'`，避免 Excel 執行公式。
 
 ## CSV 格式
 

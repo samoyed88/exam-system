@@ -345,3 +345,36 @@ tr.flagged td { background: #fff6f5; }
   .tabs button { padding: 0 .5rem; }
 }
 .field-row select { max-width: 460px; }
+
+/* ── 成績統計圖表 ── */
+.chart-head { display: flex; gap: .75rem 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: .6rem; }
+.chart-controls { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.inline-field { display: inline-flex; align-items: center; gap: .4rem; margin: 0; font-weight: 400; font-size: .88rem; color: var(--text-muted); }
+.inline-field select, .inline-field input, .cut-input { width: auto; padding: .3rem .5rem; font-size: .9rem; }
+.inline-field input, .cut-input { max-width: 6rem; }
+.chart-legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: .82rem; color: var(--text-muted); margin-bottom: .25rem; }
+.chart-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; background: var(--brand); margin-right: .35rem; vertical-align: -1px; }
+.chart-legend .sw.ng { background: var(--ng); }
+.chart-legend .sw.line { width: 14px; height: 0; border-top: 2px dashed var(--text); border-radius: 0; vertical-align: 3px; background: none; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart .grid { stroke: #e9edf2; stroke-width: 1; }
+.chart .axis { stroke: var(--border-strong); stroke-width: 1; }
+.chart .tick { font-size: 11px; fill: var(--text-muted); }
+.chart .val { font-size: 11px; fill: var(--text); font-weight: 600; }
+.chart .mark { fill: var(--brand); }
+.chart .mark.ng { fill: var(--ng); }
+.chart .mark.sel { stroke: var(--text); stroke-width: 2; }
+.chart .hit { fill: transparent; cursor: pointer; }
+.chart .hit:hover { fill: rgba(31, 95, 168, .06); }
+.chart .pass { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+.chart .pass-label { fill: var(--text); font-weight: 600; pointer-events: none; }
+.chart-tip { position: fixed; z-index: 50; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; box-shadow: var(--shadow); padding: .45rem .65rem; font-size: .85rem; max-width: 320px; }
+td.score-ng { color: var(--ng); font-weight: 600; }
+.scroll-table { max-height: 420px; overflow-y: auto; }
+.scroll-table tr:first-child th { position: sticky; top: 0; z-index: 1; }
+.scroll-table td, .scroll-table th { white-space: nowrap; }
+@media (max-width: 640px) {
+  /* 手機上圖表維持可讀字級，改在卡片內左右捲動 */
+  .chart { overflow-x: auto; }
+  .chart svg { min-width: 600px; }
+}

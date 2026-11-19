@@ -1,4 +1,4 @@
-# 預設只啟動 app（http://localhost:8000）。
+# 預設只啟動 app（http://localhost:8000，可用 .env 的 APP_PORT 改）。
 # 對外公開二選一：
 #   docker compose --profile tunnel up -d   # Cloudflare Tunnel（Mac mini 放家裡適用，IP_HEADER=cf）
 #   docker compose --profile caddy up -d    # Caddy 自動 HTTPS（VPS 適用，IP_HEADER=xff）
@@ -10,7 +10,7 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
 
   cloudflared:
     image: cloudflare/cloudflared:2024.10.0
@@ -19,6 +19,8 @@ services:
     command: tunnel --no-autoupdate run
     environment:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+      # 用 CLI 建的 tunnel（沒有在 Dashboard 設 Public Hostname）時，直接把流量送到 app
+      - TUNNEL_URL=http://app:8000
     depends_on:
       - app
 

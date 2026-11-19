@@ -6,19 +6,22 @@ import json
 import os
 import random
 import sqlite3
+import statistics
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import URL, Headers, MutableHeaders
 from pydantic import BaseModel
 
 from .auth import (
-    ADMIN_TTL, STUDENT_TTL, check_admin_password, client_ip, current_student, hash_password,
-    ip_allowed, login_locked, make_token, record_failure, require_admin, verify_password,
+    ADMIN_TTL, admin_subject, check_admin_password, client_ip, current_student, hash_password,
+    ip_allowed, login_locked, make_token, record_failure, require_admin, student_token,
+    verify_password,
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
@@ -39,7 +42,53 @@ async def lifespan(_app):
     task.cancel()
 
 
-app = FastAPI(title="考試系統", docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title="考試系統", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+MAX_BODY = 64 * 1024             # 學生端請求：一題答案用不到這麼多
+MAX_ADMIN_BODY = 20 * 1024 * 1024  # 後台匯入 xlsx（base64）
+SECURITY_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                               "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; "
+                               "form-action 'self'; object-src 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Strict-Transport-Security": "max-age=15552000",
+}
+
+
+class SecurityMiddleware:
+    """純 ASGI 寫法：BaseHTTPMiddleware（@app.middleware）在 100 人同時作答時會讓存檔延遲變成好幾倍。"""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = Headers(scope=scope)
+        path = scope["path"]
+        # 經 Cloudflare 進來的 http 連線轉到 https，避免學號、token 明文傳送
+        if os.getenv("IP_HEADER", "").lower() == "cf" and '"http"' in headers.get("cf-visitor", ""):
+            url = str(URL(scope=scope).replace(scheme="https"))
+            return await RedirectResponse(url, status_code=308)(scope, receive, send)
+        limit = MAX_ADMIN_BODY if path.startswith("/api/admin/") else MAX_BODY
+        length = headers.get("content-length", "")
+        if length.isdigit() and int(length) > limit:
+            return await JSONResponse({"detail": "資料太大"}, status_code=413)(scope, receive, send)
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                out = MutableHeaders(scope=message)
+                out.update(SECURITY_HEADERS)
+                if path.startswith("/api/"):
+                    out["Cache-Control"] = "no-store"  # 考場電腦共用，成績與作答不要留在快取
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(SecurityMiddleware)
 
 
 async def auto_submit_loop():
@@ -130,14 +179,16 @@ def finalize(db, attempt_id: int) -> None:
 
 
 def finalize_expired(db, exam_id: int | None = None) -> None:
-    cutoff = (now() - timedelta(seconds=GRACE_SECONDS)).isoformat()
-    sql = "SELECT id FROM attempts WHERE submitted_at IS NULL AND deadline < ?"
-    args: list = [cutoff]
+    # 用時間物件比較而不是比字串：舊資料的 deadline 可能帶 +08:00，跟 UTC 字串比會差 8 小時
+    cutoff = now() - timedelta(seconds=GRACE_SECONDS)
+    sql = "SELECT id, deadline FROM attempts WHERE submitted_at IS NULL"
+    args: list = []
     if exam_id is not None:
         sql += " AND exam_id = ?"
         args.append(exam_id)
     for row in db.execute(sql, args).fetchall():
-        finalize(db, row["id"])
+        if datetime.fromisoformat(row["deadline"]) < cutoff:
+            finalize(db, row["id"])
 
 
 def regrade(db, attempt_id: int) -> None:
@@ -226,35 +277,49 @@ def health():
     return {"status": "ok"}
 
 
+# 同一個 IP 5 分鐘內輸入不存在的學號超過這個次數就先擋住，避免被逐一試出全班學號與姓名。
+# 全校學生可能共用同一個對外 IP，所以設得寬鬆
+MAX_UNKNOWN_IDS = 60
+
+
 @app.post("/api/login")
-def login(body: LoginIn, db=Depends(get_db)):
+def login(body: LoginIn, request: Request, db=Depends(get_db)):
     sid = body.student_id.strip()
+    ip = client_ip(request)
+    if login_locked(f"unknown|{ip}", MAX_UNKNOWN_IDS):
+        raise HTTPException(429, "嘗試次數太多，請稍後再試")
     student = db.execute("SELECT * FROM students WHERE student_id = ?", (sid,)).fetchone()
     if not student:
+        record_failure(f"unknown|{ip}")
         raise HTTPException(404, "名單裡沒有這個學號，請再確認一次")
     if student["password_hash"]:
         # 設了密碼的帳號，密碼對之前不透露姓名
         if not body.password:
             return {"need_password": True}
-        if login_locked(sid):
+        key = f"pw|{ip}|{sid}"
+        if login_locked(key):
             raise HTTPException(429, "密碼錯誤次數太多，請 5 分鐘後再試，或請老師重設密碼")
         if not verify_password(body.password, student["password_hash"]):
-            record_failure(sid)
+            record_failure(key)
             raise HTTPException(401, "密碼錯誤")
-    return {"token": make_token("s", sid, STUDENT_TTL), "student": public_student(student)}
+    return {"token": student_token(sid, student["password_hash"]), "student": public_student(student)}
 
 
 @app.post("/api/me/password")
 def change_password(body: PasswordIn, sid: str = Depends(current_student), db=Depends(get_db)):
     student = load_student(db, sid)
-    if student["password_hash"] and not verify_password(body.old_password,
-                                                         student["password_hash"]):
-        raise HTTPException(400, "原本的密碼不正確")
+    if student["password_hash"]:
+        if login_locked(f"change|{sid}"):
+            raise HTTPException(429, "密碼錯誤次數太多，請 5 分鐘後再試，或請老師重設密碼")
+        if not verify_password(body.old_password, student["password_hash"]):
+            record_failure(f"change|{sid}")
+            raise HTTPException(400, "原本的密碼不正確")
     if len(body.new_password) < 4 or len(body.new_password) > 64:
         raise HTTPException(400, "新密碼長度要 4 到 64 個字元")
-    db.execute("UPDATE students SET password_hash = ? WHERE student_id = ?",
-               (hash_password(body.new_password), sid))
-    return {"ok": True}
+    new_hash = hash_password(body.new_password)
+    db.execute("UPDATE students SET password_hash = ? WHERE student_id = ?", (new_hash, sid))
+    # 舊 token 隨密碼失效，回傳新的讓本人不用重新登入
+    return {"ok": True, "token": student_token(sid, new_hash)}
 
 
 def load_student(db, sid: str) -> sqlite3.Row:
@@ -362,7 +427,7 @@ def start_exam(exam_id: int, body: StartIn, request: Request,
         deadline = started + timedelta(minutes=exam["duration_min"])
         end = parse_time(exam["end_at"])
         if end and end < deadline:
-            deadline = end
+            deadline = end.astimezone(timezone.utc)  # 一律存 UTC，finalize_expired 才比得準
         try:
             db.execute(
                 "INSERT INTO attempts (exam_id, student_id, started_at, deadline, ip, device) "
@@ -393,18 +458,28 @@ def valid_response(q: sqlite3.Row, response) -> bool:
     if q["type"] == "single":
         return isinstance(response, int) and 0 <= response < n_opts
     if q["type"] == "multi":
-        return isinstance(response, list) and all(
+        return isinstance(response, list) and len(response) <= n_opts and all(
             isinstance(i, int) and 0 <= i < n_opts for i in response)
-    return isinstance(response, list) and all(
+    blanks = len(json.loads(q["answer"]))
+    return isinstance(response, list) and len(response) <= blanks and all(
         isinstance(s, str) and len(s) <= 200 for s in response)
 
 
+def require_exam_ip(db, attempt: sqlite3.Row, request: Request) -> None:
+    # 不只開始作答時檢查：否則學生在考場進場後，把 token 交給校外的人就能代答
+    exam = exam_or_404(db, attempt["exam_id"])
+    ip = client_ip(request)
+    if not ip_allowed(ip, exam["allowed_ips"]):
+        raise HTTPException(403, f"請在考場電腦作答（目前連線 IP：{ip}）")
+
+
 @app.put("/api/attempts/{attempt_id}/answers")
-def save_answer(attempt_id: int, body: AnswerIn,
+def save_answer(attempt_id: int, body: AnswerIn, request: Request,
                 sid: str = Depends(current_student), db=Depends(get_db)):
     attempt = own_attempt(db, attempt_id, sid)
     if attempt["submitted_at"]:
         raise HTTPException(409, "已經交卷，無法再修改")
+    require_exam_ip(db, attempt, request)
     if now() > datetime.fromisoformat(attempt["deadline"]) + timedelta(seconds=GRACE_SECONDS):
         finalize(db, attempt_id)
         raise HTTPException(409, "作答時間已到，系統已自動交卷")
@@ -491,8 +566,11 @@ def result_payload(db, attempt: sqlite3.Row, just_submitted: bool = False) -> di
 
 
 @app.post("/api/attempts/{attempt_id}/submit")
-def submit_attempt(attempt_id: int, sid: str = Depends(current_student), db=Depends(get_db)):
-    own_attempt(db, attempt_id, sid)
+def submit_attempt(attempt_id: int, request: Request,
+                   sid: str = Depends(current_student), db=Depends(get_db)):
+    attempt = own_attempt(db, attempt_id, sid)
+    if not attempt["submitted_at"]:
+        require_exam_ip(db, attempt, request)
     finalize(db, attempt_id)
     attempt = own_attempt(db, attempt_id, sid)
     # 交卷後 2 分鐘內算「交卷當下」，一定給看詳解（若老師開放且已公布）；之後依複習設定。
@@ -575,10 +653,14 @@ class AcceptFillIn(BaseModel):
 
 
 @app.post("/api/admin/login")
-def admin_login(body: AdminLoginIn):
+def admin_login(body: AdminLoginIn, request: Request):
+    key = f"admin|{client_ip(request)}"
+    if login_locked(key, limit=10, window=900):
+        raise HTTPException(429, "密碼錯誤次數太多，請 15 分鐘後再試")
     if not check_admin_password(body.password):
+        record_failure(key)
         raise HTTPException(401, "密碼錯誤")
-    return {"token": make_token("a", "teacher", ADMIN_TTL)}
+    return {"token": make_token("a", admin_subject(), ADMIN_TTL)}
 
 
 @app.get("/api/admin/myip", dependencies=[admin])
@@ -921,6 +1003,12 @@ def monitor(exam_id: int, db=Depends(get_db)):
     return {"exam": dict(exam), "rows": rows}
 
 
+def csv_text(value) -> str:
+    # 電腦代碼是學生自己送的、姓名來自匯入檔：= + - @ 開頭在 Excel 會被當公式執行
+    value = "" if value is None else str(value)
+    return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
 @app.get("/api/admin/exams/{exam_id}/results.csv", dependencies=[admin])
 def results_csv(exam_id: int, db=Depends(get_db)):
     data = monitor(exam_id, db)
@@ -938,9 +1026,10 @@ def results_csv(exam_id: int, db=Depends(get_db)):
     status_text = {"absent": "缺考", "in_progress": "作答中", "submitted": "已交卷"}
     for row in data["rows"]:
         aid = row.get("attempt_id")
-        w.writerow([row["student_id"], row["name"], row["class_name"], status_text[row["status"]],
-                    row.get("score", ""), row.get("max_score", ""), row.get("ip", ""),
-                    row.get("device", ""), row.get("tab_switches", ""),
+        w.writerow([csv_text(row["student_id"]), csv_text(row["name"]),
+                    csv_text(row["class_name"]), status_text[row["status"]],
+                    row.get("score", ""), row.get("max_score", ""), csv_text(row.get("ip", "")),
+                    csv_text(row.get("device", "")), row.get("tab_switches", ""),
                     *[per_q.get((aid, q["id"]), "") if aid else "" for q in qs]])
     filename = f"exam-{exam_id}-results.csv"
     return Response(buf.getvalue(), media_type="text/csv; charset=utf-8",
@@ -984,6 +1073,52 @@ def exam_stats(exam_id: int, db=Depends(get_db)):
             item["option_counts"] = counts
         out.append(item)
     return out
+
+
+def quantile(sorted_vals: list[float], p: float) -> float:
+    # 線性內插，與 Excel 的 PERCENTILE.INC 相同
+    k = (len(sorted_vals) - 1) * p
+    lo = int(k)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (k - lo)
+
+
+@app.get("/api/admin/exams/{exam_id}/scores", dependencies=[admin])
+def exam_scores(exam_id: int, db=Depends(get_db)):
+    data = monitor(exam_id, db)
+    qs = exam_questions(db, exam_id)
+    max_score = sum(q["points"] for q in qs)
+    done = sorted((r for r in data["rows"] if r["status"] == "submitted"),
+                  key=lambda r: -r["score"])
+    rows = []
+    for r in done:
+        # 同分同名次
+        rank = rows[-1]["rank"] if rows and rows[-1]["score"] == r["score"] else len(rows) + 1
+        rows.append({"student_id": r["student_id"], "name": r["name"], "score": r["score"],
+                     "rank": rank, "submitted_at": r["submitted_at"]})
+    vals = sorted(r["score"] for r in rows)
+    summary = {"count": len(vals),
+               "absent": sum(1 for r in data["rows"] if r["status"] == "absent"),
+               "in_progress": sum(1 for r in data["rows"] if r["status"] == "in_progress")}
+    if vals:
+        summary.update({
+            "mean": round(statistics.fmean(vals), 2),
+            "median": round(statistics.median(vals), 2),
+            "sd": round(statistics.pstdev(vals), 2),
+            "min": vals[0], "max": vals[-1],
+            "q1": round(quantile(vals, .25), 2), "q3": round(quantile(vals, .75), 2)})
+    # 各題得分率：已交卷者在這題的平均得分 / 配分，沒作答算 0 分
+    earned = {r["question_id"]: r["total"] for r in db.execute(
+        "SELECT ans.question_id, SUM(ans.score) AS total FROM answers ans "
+        "JOIN attempts a ON a.id = ans.attempt_id "
+        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL GROUP BY ans.question_id",
+        (exam_id,))}
+    questions = [{"id": q["id"], "type": q["type"], "stem": q["stem"], "points": q["points"],
+                  "rate": round((earned.get(q["id"]) or 0) / (q["points"] * len(vals)), 3)
+                  if vals and q["points"] else None}
+                 for q in qs]
+    return {"exam": {"id": exam_id, "title": data["exam"]["title"]}, "max_score": max_score,
+            "summary": summary, "rows": rows, "questions": questions}
 
 
 @app.post("/api/admin/questions/{qid}/accept-fill", dependencies=[admin])

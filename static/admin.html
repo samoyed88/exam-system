@@ -126,10 +126,59 @@
     <h1 id="mon-title"></h1>
     <span class="muted">每 5 秒自動更新</span>
     <a class="btn ghost sm" id="mon-csv" href="#">匯出成績 CSV</a>
+    <button class="btn ghost sm" id="mon-scores">成績統計</button>
     <button class="btn ghost sm" id="mon-stats">各題分析</button>
   </div>
   <div class="summary" id="mon-summary"></div>
   <div class="table-wrap"><table id="mon-table"></table></div>
+</section>
+
+<!-- 成績統計 -->
+<section id="view-scores" class="container wide hidden">
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="scores-back">考場監控</a> / 成績統計</div>
+  <div class="toolbar">
+    <h1 id="scores-title"></h1>
+    <button class="btn ghost sm" id="scores-refresh">重新整理</button>
+  </div>
+  <div class="summary" id="sc-summary"></div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">分數分布</div>
+      <div class="chart-controls">
+        <label class="inline-field">分數<select id="sc-unit"><option value="raw">原始分數</option><option value="pct">換算百分制</option></select></label>
+        <label class="inline-field">組距<select id="sc-bin"><option value="5">5 分</option><option value="10" selected>10 分</option></select></label>
+        <label class="inline-field">及格線<input type="number" id="sc-pass" step="any" min="0"></label>
+      </div>
+    </div>
+    <div class="chart-legend"><span><i class="sw"></i>及格</span><span><i class="sw ng"></i>未及格</span><span><i class="sw line"></i>及格線</span><span class="muted">點長條可列出該區間的學生</span></div>
+    <div class="chart" id="sc-hist"></div>
+  </div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">學生名單</div>
+      <div class="chart-controls">
+        <label class="inline-field">篩選<select id="sc-mode">
+          <option value="all">全部</option>
+          <option value="below">低於</option>
+          <option value="atleast">高於或等於</option>
+          <option value="range" hidden>區間</option>
+        </select></label>
+        <input type="number" id="sc-cut" step="any" min="0" class="cut-input">
+        <span class="muted" id="sc-count"></span>
+        <button class="btn ghost sm" id="sc-copy">複製名單</button>
+      </div>
+    </div>
+    <div class="msg" id="sc-msg"></div>
+    <div class="table-wrap scroll-table"><table id="sc-table"></table></div>
+  </div>
+  <div class="card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0">各題得分率</div>
+      <span class="muted">已交卷學生在這題的平均得分 ÷ 配分；點長條看該題分析</span>
+    </div>
+    <div class="chart" id="sc-qchart"></div>
+  </div>
+  <div class="chart-tip hidden" id="sc-tip"></div>
 </section>
 
 <!-- 各題分析 -->

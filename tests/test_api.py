@@ -19,6 +19,8 @@ from app.grading import grade  # noqa: E402
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "exam.db")
     monkeypatch.delenv("IP_HEADER", raising=False)
+    from app import auth
+    auth._failures.clear()
     from app.main import app
     with TestClient(app) as c:
         yield c
@@ -395,3 +397,152 @@ def test_student_password_flow(client):
     client.post("/api/admin/students/import", headers=h,
                 json={"csv": (ROOT / "static/samples/students.csv").read_text()})
     assert client.post("/api/login", json={"student_id": "11202"}).json() == {"need_password": True}
+
+
+def test_score_stats(client):
+    h, exam_id = setup_exam(client)
+    for sid, single in (("11201", 0), ("11202", 1)):
+        s = student_headers(client, sid)
+        aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+        client.put(f"/api/attempts/{aid}/answers", json={"question_id": 1, "response": single}, headers=s)
+        client.post(f"/api/attempts/{aid}/submit", headers=s)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert data["max_score"] == 8
+    assert [(r["student_id"], r["score"], r["rank"]) for r in data["rows"]] == [("11201", 2, 1), ("11202", 0, 2)]
+    sm = data["summary"]
+    assert (sm["count"], sm["absent"], sm["mean"], sm["median"], sm["min"], sm["max"]) == (2, 1, 1, 1, 0, 2)
+    assert (sm["q1"], sm["q3"]) == (0.5, 1.5)
+    # 第 1 題一人對一人錯 → 50%；其他題沒人作答 → 0
+    assert [q["rate"] for q in data["questions"]] == [0.5, 0, 0]
+
+
+def test_score_stats_ties_and_empty(client):
+    h, exam_id = setup_exam(client)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert data["rows"] == [] and data["summary"]["count"] == 0 and "mean" not in data["summary"]
+    assert all(q["rate"] is None for q in data["questions"])
+    for sid in ("11201", "11202"):
+        s = student_headers(client, sid)
+        aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+        client.post(f"/api/attempts/{aid}/submit", headers=s)
+    data = client.get(f"/api/admin/exams/{exam_id}/scores", headers=h).json()
+    assert [r["rank"] for r in data["rows"]] == [1, 1]
+
+
+# ── 資安 ──
+
+def test_fill_exponent_does_not_hang():
+    import time
+    t = time.time()
+    # 1e999999999 若交給 Fraction 展開要算好幾小時
+    assert grade("fill", [["8"]], ["1e999999999"], 1) == 0
+    assert grade("fill", [["0.5"]], ["1/2"], 1) == 1
+    assert grade("fill", [["0.5"]], [".5"], 1) == 1
+    assert time.time() - t < 1
+
+
+def test_answer_size_limits(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    save = lambda qid, resp: client.put(f"/api/attempts/{aid}/answers",
+                                        json={"question_id": qid, "response": resp}, headers=s)
+    assert save(3, ["a", "b"]).status_code == 200
+    assert save(3, ["a"] * 3).status_code == 400          # 填充題只有 2 格
+    assert save(2, [0, 0, 0, 0, 0, 0]).status_code == 400  # 多選題只有 5 個選項
+    big = client.put(f"/api/attempts/{aid}/answers", headers={**s, "content-type": "application/json"},
+                     content=b'{"question_id": 3, "response": ["' + b"x" * 100_000 + b'"]}')
+    assert big.status_code == 413
+
+
+def test_ip_checked_on_save_and_submit(client, monkeypatch):
+    monkeypatch.setenv("IP_HEADER", "cf")
+    h, exam_id = setup_exam(client, allowed_ips="203.0.113.0/24")
+    s = student_headers(client, "11201")
+    inside = {**s, "CF-Connecting-IP": "203.0.113.5"}
+    outside = {**s, "CF-Connecting-IP": "8.8.8.8"}
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=inside).json()["attempt_id"]
+    body = {"question_id": 1, "response": 0}
+    assert client.put(f"/api/attempts/{aid}/answers", json=body, headers=outside).status_code == 403
+    assert client.post(f"/api/attempts/{aid}/submit", headers=outside).status_code == 403
+    assert client.put(f"/api/attempts/{aid}/answers", json=body, headers=inside).status_code == 200
+    assert client.post(f"/api/attempts/{aid}/submit", headers=inside).status_code == 200
+
+
+def test_end_time_deadline_auto_submits(client):
+    from datetime import datetime, timedelta
+    from app import main
+    end = (datetime.now(main.TZ) + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+    h, exam_id = setup_exam(client, end_at=end)
+    s = student_headers(client, "11201")
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    conn = main.connect()
+    deadline = conn.execute("SELECT deadline FROM attempts WHERE id = ?", (aid,)).fetchone()[0]
+    assert deadline.endswith("+00:00")
+    # 舊資料可能存成 +08:00：過期後仍要被代交，不能因為跟 UTC 字串比較而晚 8 小時
+    past = (datetime.now(main.TZ) - timedelta(minutes=2)).isoformat()
+    conn.execute("UPDATE attempts SET deadline = ? WHERE id = ?", (past, aid))
+    main.finalize_expired(conn)
+    assert conn.execute("SELECT submitted_at FROM attempts WHERE id = ?", (aid,)).fetchone()[0]
+    conn.close()
+
+
+def test_admin_login_lockout(client):
+    for _ in range(10):
+        assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 401
+    assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 429
+    assert client.post("/api/admin/login", json={"password": "teacher"}).status_code == 429
+
+
+def test_unknown_student_ids_rate_limited(client):
+    setup_exam(client)
+    from app import main
+    codes = [client.post("/api/login", json={"student_id": f"9{i:04d}"}).status_code
+             for i in range(main.MAX_UNKNOWN_IDS + 1)]
+    assert codes[:-1] == [404] * main.MAX_UNKNOWN_IDS and codes[-1] == 429
+
+
+def test_password_change_revokes_old_tokens(client):
+    h, _ = setup_exam(client)
+    old = student_headers(client, "11201")
+    r = client.post("/api/me/password", json={"old_password": "", "new_password": "pass1234"}, headers=old)
+    assert client.get("/api/exams", headers=old).status_code == 401
+    new = {"Authorization": f"Bearer {r.json()['token']}"}
+    assert client.get("/api/exams", headers=new).status_code == 200
+    # 老師重設密碼後，學生手上的 token 也失效
+    client.post("/api/admin/students/11201/reset-password", headers=h)
+    assert client.get("/api/exams", headers=new).status_code == 401
+
+
+def test_admin_token_bound_to_password(client, monkeypatch):
+    h = admin_headers(client)
+    assert client.get("/api/admin/exams", headers=h).status_code == 200
+    from app import auth
+    monkeypatch.setattr(auth, "ADMIN_PASSWORD", "changed")
+    assert client.get("/api/admin/exams", headers=h).status_code == 401
+
+
+def test_malformed_tokens_are_401(client):
+    import base64
+    for raw in ["s:11201:abc:" + "é" * 64, "s:a:b:c:d", "garbage", ""]:
+        t = base64.urlsafe_b64encode(raw.encode()).decode()
+        assert client.get("/api/exams", headers={"Authorization": f"Bearer {t}"}).status_code == 401
+
+
+def test_security_headers_and_https_redirect(client, monkeypatch):
+    r = client.get("/admin")
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert client.get("/api/health").headers["cache-control"] == "no-store"
+    assert client.get("/openapi.json").status_code == 404
+    monkeypatch.setenv("IP_HEADER", "cf")
+    r = client.get("/admin", headers={"cf-visitor": '{"scheme":"http"}'}, follow_redirects=False)
+    assert r.status_code == 308 and r.headers["location"].startswith("https://")
+
+
+def test_csv_formula_injection_escaped(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    client.post(f"/api/exams/{exam_id}/start", json={"device": '=HYPERLINK("http://e/","x")'}, headers=s)
+    text = client.get(f"/api/admin/exams/{exam_id}/results.csv", headers=h).text
+    assert "'=HYPERLINK" in text and ',"=HYPERLINK' not in text

@@ -132,7 +132,9 @@
     if (pw !== pw2) msg = '兩次輸入的新密碼不一樣。';
     else {
       try {
-        await call('POST', '/api/me/password', { old_password: oldPw, new_password: pw });
+        const r = await call('POST', '/api/me/password', { old_password: oldPw, new_password: pw });
+        token = r.token;  // 舊 token 隨密碼失效
+        store('exam_token', token);
         student.has_password = true;
         store('exam_student', JSON.stringify(student));
         renderPwBanner();
