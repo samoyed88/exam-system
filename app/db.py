@@ -13,6 +13,12 @@ CREATE TABLE IF NOT EXISTS students (
     password_hash TEXT NOT NULL DEFAULT ''  -- 空 = 尚未設定密碼，只輸入學號即可登入
 );
 
+-- 班級：學生以 students.class_name 歸班；這裡放班級本身與座位表（同班每場考試共用）
+CREATE TABLE IF NOT EXISTS classes (
+    name     TEXT PRIMARY KEY,
+    seat_map TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS questions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     type        TEXT NOT NULL CHECK (type IN ('single', 'multi', 'fill')),
@@ -140,6 +146,9 @@ def init_db() -> None:
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
                 except sqlite3.OperationalError:
                     pass  # 另一個 worker 同時補過了
+        # 舊資料只有學生身上的班級名稱，補進班級表
+        conn.execute("INSERT OR IGNORE INTO classes (name) "
+                     "SELECT DISTINCT class_name FROM students WHERE class_name != ''")
     finally:
         conn.close()
 

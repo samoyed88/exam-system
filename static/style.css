@@ -418,6 +418,16 @@ tr.same-wrong td { background: var(--ng-soft); }
 tr.same-sync td { background: var(--warn-soft); }
 tr.pair-row { cursor: pointer; }
 @media (max-width: 960px) { .seat-input { grid-template-columns: 1fr; } }
+
+/* ── 班級分頁 ── */
+.class-tabs { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: 1rem; }
+.class-tabs button { font: inherit; font-size: .9rem; padding: .35rem .8rem; border: 1px solid var(--border-strong); background: #fff; border-radius: 3px; cursor: pointer; color: var(--text); }
+.class-tabs button .n { font-family: var(--mono); font-size: .78rem; color: var(--text-muted); margin-left: .35rem; }
+.class-tabs button:hover { border-color: var(--rule); }
+.class-tabs button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.class-tabs button.active .n { color: #c9d4e2; }
+.seat.unknown { border-color: var(--ng); border-style: dashed; color: var(--ng); }
+td select.inline-select { width: auto; padding: .2rem .4rem; font-size: .85rem; }
 .chart .mark.sel { stroke: var(--text); stroke-width: 2; }
 .chart .hit { fill: transparent; cursor: pointer; }
 .chart .hit:hover { fill: rgba(31, 28, 23, .045); }

@@ -825,3 +825,68 @@ def test_seat_import_xlsx_with_merged_cells(client):
     bad = client.post(f"/api/admin/exams/{exam_id}/seats/import",
                       json={"data": base64.b64encode(b"not a zip").decode(), "filename": "x.xlsx"}, headers=h)
     assert bad.status_code == 400
+
+
+# ── 班級（增刪改查）──
+
+def test_class_crud(client):
+    h, exam_id = setup_exam(client)
+    assert client.get("/api/admin/classes", headers=h).json()["unassigned"] == 3  # 範例名單沒有班級
+    assert client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=h).status_code == 200
+    assert client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=h).status_code == 409
+    assert client.post("/api/admin/classes", json={"name": " "}, headers=h).status_code == 400
+    assert client.post("/api/admin/classes", json={"name": "a,b"}, headers=h).status_code == 400
+    # 學生新增、改班、改名
+    client.post("/api/admin/students", json={"student_id": "S1", "name": "甲", "class_name": "資管一乙"}, headers=h)
+    client.post("/api/admin/students", json={"student_id": "S2", "name": "乙", "class_name": "資管一乙"}, headers=h)
+    client.post("/api/admin/students", json={"student_id": "S2", "name": "乙乙", "class_name": "資管一乙"}, headers=h)
+    roster = {s["student_id"]: s for s in client.get("/api/admin/students", headers=h).json()}
+    assert roster["S2"]["name"] == "乙乙"
+    # 考試只開放給資管一乙
+    exam = client.get(f"/api/admin/exams/{exam_id}", headers=h).json()
+    exam.update(class_names="資管一乙")
+    assert client.put(f"/api/admin/exams/{exam_id}", json=exam, headers=h).status_code == 200
+    # 改名：學生與考試的開放班級一起改
+    assert client.put("/api/admin/classes/資管一乙", json={"name": "資管一甲"}, headers=h).status_code == 200
+    assert client.get(f"/api/admin/exams/{exam_id}", headers=h).json()["class_names"] == "資管一甲"
+    roster = {s["student_id"]: s for s in client.get("/api/admin/students", headers=h).json()}
+    assert roster["S1"]["class_name"] == "資管一甲"
+    s = student_headers(client, "S1")
+    assert [e["id"] for e in client.get("/api/exams", headers=s).json()["exams"]] == [exam_id]
+    assert client.put("/api/admin/classes/不存在", json={"name": "x"}, headers=h).status_code == 404
+    # 刪除班級：學生保留到未分班
+    client.post("/api/admin/classes", json={"name": "暫時班"}, headers=h)
+    client.post("/api/admin/students", json={"student_id": "S3", "name": "丙", "class_name": "暫時班"}, headers=h)
+    r = client.delete("/api/admin/classes/暫時班", headers=h).json()
+    assert r["unassigned"] == 1 and r["deleted"] == 0
+    assert client.get("/api/admin/classes", headers=h).json()["unassigned"] >= 1
+    # 刪除班級連學生：有作答紀錄的保留
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    r = client.delete("/api/admin/classes/資管一甲", params={"students": "delete"}, headers=h).json()
+    assert r == {"ok": True, "deleted": 1, "unassigned": 1}
+    roster = {x["student_id"]: x for x in client.get("/api/admin/students", headers=h).json()}
+    assert "S2" not in roster and roster["S1"]["class_name"] == ""
+    assert client.get(f"/api/admin/exams/{exam_id}", headers=h).json()["class_names"] == ""
+    assert aid
+
+
+def test_class_seat_map_shared_by_exams(client):
+    h, exam_id = setup_exam(client)
+    client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=h)
+    for sid, name in (("15130841", "賴郁方"), ("15131586", "鄭紹如")):
+        client.post("/api/admin/students", json={"student_id": sid, "name": name, "class_name": "資管一乙"}, headers=h)
+    text = "\n".join("\t".join(r) for r in SCHOOL_SHEET)
+    v = client.put("/api/admin/classes/資管一乙/seats", json={"seat_map": text}, headers=h).json()
+    known = [c["code"] for row in v["grid"] for c in row if c and c["known"]]
+    assert sorted(known) == ["15130841", "15131586"]
+    assert "12400212李柔萱" in v["unknown"]            # 名單上沒有這位
+    assert client.get("/api/admin/classes", headers=h).json()["classes"][0]["seats"] > 0
+    # 只開放給資管一乙的考試，座位分析直接用班級座位表；在考試頁修改也會改到班級
+    exam = client.get(f"/api/admin/exams/{exam_id}", headers=h).json()
+    exam.update(class_names="資管一乙")
+    client.put(f"/api/admin/exams/{exam_id}", json=exam, headers=h)
+    d = client.get(f"/api/admin/exams/{exam_id}/seats", headers=h).json()
+    assert d["owner"] == "資管一乙" and d["seat_map"] == v["seat_map"]
+    client.put(f"/api/admin/exams/{exam_id}/seats", json={"seat_map": "15130841,15131586"}, headers=h)
+    assert client.get("/api/admin/classes/資管一乙/seats", headers=h).json()["seat_map"] == "15130841,15131586"
+    assert client.get("/api/admin/classes/資管一乙/seats", headers=h).json()["unseated"] == []

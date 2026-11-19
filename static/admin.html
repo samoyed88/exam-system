@@ -42,6 +42,9 @@
       <fieldset>
         <legend>一般</legend>
         <div class="field-row"><label for="e-title">考試名稱</label><input type="text" id="e-title" placeholder="例如 第一次段考"></div>
+        <div class="field-row"><label>開放給哪些班級</label>
+          <div><div id="e-classes"></div>
+          <div class="hint">都不勾代表所有學生都看得到。只勾一個班級時，座位分析會直接使用該班的座位表。</div></div></div>
         <div class="field-row"><label>學生是否看得到</label>
           <div><label class="check"><input type="checkbox" id="e-published"> 開放給學生（不勾選時學生清單看不到這場考試）</label></div></div>
       </fieldset>
@@ -204,6 +207,7 @@
   <p class="alert info">依座位表比對每一對左右、前後相鄰的同學：<b>兩人都答錯、而且錯成同一個答案</b>的題數，以及<b>30 秒內給出同一題相同答案</b>的題數，計算碰巧發生的機率（已考慮程度差異與檢查組數）。這是統計上的線索，不是作弊證據，請配合監考觀察判斷。</p>
   <div class="card">
     <div class="card-title">座位表</div>
+    <p class="muted" id="seat-owner"></p>
     <div class="seat-input">
       <textarea id="seat-map" class="mono" rows="8" spellcheck="false" placeholder="PC01,PC02,PC03,,PC04,PC05,PC06&#10;PC07,PC08,PC09,,PC10,PC11,PC12"></textarea>
       <div class="hint">
@@ -273,6 +277,17 @@
 </section>
 <div class="chart-tip hidden" id="sc-tip"></div>
 
+<div class="modal hidden" id="modal">
+  <div class="modal-box">
+    <h3 id="modal-title"></h3>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="modal-cancel">取消</button>
+      <button class="btn" id="modal-ok">確定</button>
+    </div>
+  </div>
+</div>
+
 <!-- 各題分析 -->
 <section id="view-stats" class="container wide hidden">
   <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="stats-back">考場監控</a> / 各題分析</div>
@@ -319,23 +334,72 @@
 <section id="view-students" class="container wide hidden">
   <div class="toolbar">
     <h1>學生名單</h1>
+    <button class="btn" id="new-class">＋ 新增班級</button>
   </div>
+  <div class="class-tabs" id="class-tabs"></div>
+  <div class="msg" id="s-msg"></div>
+
+  <!-- 選定班級的操作 -->
+  <div class="card hidden" id="class-card">
+    <div class="chart-head">
+      <div class="card-title" style="margin:0" id="class-title"></div>
+      <div class="row">
+        <button class="btn ghost sm" id="class-seats-btn">座位表</button>
+        <button class="btn ghost sm" id="class-rename">重新命名</button>
+        <button class="btn danger sm" id="class-delete">刪除班級</button>
+      </div>
+    </div>
+    <div class="muted" id="class-info"></div>
+  </div>
+
+  <!-- 班級座位表 -->
+  <div class="card hidden" id="class-seats">
+    <div class="card-title">座位表：<span id="class-seats-name"></span></div>
+    <div class="seat-input">
+      <textarea id="class-seat-map" class="mono" rows="8" spellcheck="false" placeholder="直接匯入座位表的 Excel／CSV，或從試算表全選複製後貼上"></textarea>
+      <div class="hint">
+        <p>格子寫「學號＋姓名」（例如 15130841賴郁方）即可；「白板」那一側當作第一排，序號、保留、前後門會自動略過。</p>
+        <p>這個班的每一場考試都共用這張座位表，座位分析時直接使用。<b>空格子代表沒人坐</b>，兩側不算相鄰。</p>
+      </div>
+    </div>
+    <div class="row" style="margin-top:.75rem">
+      <label class="btn ghost" style="margin:0">匯入 Excel／CSV<input type="file" id="class-seat-file" accept=".xlsx,.csv" hidden></label>
+      <button class="btn" id="class-seat-save">儲存</button>
+      <button class="btn ghost" id="class-seat-close">關閉</button>
+    </div>
+    <div class="msg" id="class-seat-msg"></div>
+    <div class="seat-front" style="margin-top:1rem">白板／講台</div>
+    <div class="seat-scroll"><div class="seat-grid" id="class-seat-grid"></div></div>
+    <div class="muted" id="class-seat-notes" style="margin-top:.6rem"></div>
+  </div>
+
   <div class="card">
-    <div class="card-title">匯入名單</div>
-    <p class="muted">可以直接上傳學校的成績登記表（.xlsx）或 CSV，系統會自動找有「學號」「姓名」的表頭列，只讀這兩欄。
+    <div class="card-title">匯入名單 <span class="muted" style="font-weight:400" id="import-target"></span></div>
+    <p class="muted">可以直接上傳學校的成績登記表（.xlsx）或 CSV，系統會自動找有「學號」「姓名」的表頭列。
       <a href="/samples/students.csv" download>下載範例 CSV</a></p>
     <div class="row">
-      <label class="check"><input type="checkbox" id="s-replace"> 清除舊名單（有作答紀錄的保留）</label>
+      <label class="check"><input type="checkbox" id="s-replace"> <span id="s-replace-text">清除舊名單</span>（有作答紀錄的保留）</label>
       <label class="btn" style="margin:0">選擇檔案匯入<input type="file" id="s-file" accept=".xlsx,.csv" hidden></label>
     </div>
   </div>
-  <div class="card row" style="margin-top:1rem">
-    <input type="text" id="s-id" placeholder="學號" style="max-width:160px">
-    <input type="text" id="s-name" placeholder="姓名" style="max-width:160px">
-    <button class="btn sm" id="add-s">新增／更新</button>
+
+  <div class="card">
+    <div class="card-title" id="s-form-title">新增學生</div>
+    <div class="row">
+      <input type="text" id="s-id" placeholder="學號" style="max-width:160px">
+      <input type="text" id="s-name" placeholder="姓名" style="max-width:160px">
+      <select id="s-class" style="max-width:200px"></select>
+      <button class="btn sm" id="add-s">新增</button>
+      <button class="btn ghost sm hidden" id="cancel-s">取消編輯</button>
+    </div>
+    <div class="hint">學號已存在時會更新姓名與班級。</div>
   </div>
-  <div class="msg" id="s-msg"></div>
-  <div class="table-wrap" style="margin-top:.75rem"><table id="s-table"></table></div>
+
+  <div class="toolbar" style="border:none;padding:0;margin:.5rem 0">
+    <input type="text" id="s-search" placeholder="搜尋學號或姓名" style="max-width:260px">
+    <span class="muted" id="s-count"></span>
+  </div>
+  <div class="table-wrap"><table id="s-table"></table></div>
 </section>
 
 <script src="/common.js"></script>

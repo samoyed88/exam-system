@@ -1,7 +1,7 @@
 /* 老師後台：考試設定、考場監控、各題分析、題庫、名單 */
 (function () {
   'use strict';
-  const { store, api, esc, fmtTime, clock, LETTERS } = window.exam;
+  const { store, api, esc, fmtTime, clock, ask, LETTERS } = window.exam;
   const $ = id => document.getElementById(id);
 
   let token = store('exam_admin_token');
@@ -87,8 +87,9 @@
     const exams = await call('GET', '/api/admin/exams');
     const WINDOW = { not_started: '<span class="badge gray">尚未開放</span>', open: '<span class="badge ok">開放中</span>', closed: '<span class="badge ng">已關閉</span>' };
     const when = t => t ? esc(t.replace('T', ' ')) : '';
-    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>打散</th><th>已進場</th><th></th></tr>' +
+    $('exam-table').innerHTML = '<tr><th>名稱</th><th>班級</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>打散</th><th>已進場</th><th></th></tr>' +
       exams.map(e => '<tr><td><b>' + esc(e.title) + '</b></td>' +
+        '<td>' + (e.class_names ? esc(e.class_names.split(',').join('、')) : '<span class="muted">不限</span>') + '</td>' +
         '<td>' + (e.published ? WINDOW[e.window] : '<span class="badge gray">學生看不到</span>') + '</td>' +
         '<td>' + e.question_count + '</td><td>' + e.duration_min + ' 分鐘</td>' +
         '<td class="nowrap">' + (when(e.start_at) || '立即') + ' ～ ' + (when(e.end_at) || '不限') + '</td>' +
@@ -97,7 +98,7 @@
         '<td class="row"><button class="btn sm" data-monitor="' + e.id + '">監控／成績</button>' +
         '<button class="btn ghost sm" data-edit="' + e.id + '">編輯</button>' +
         '<button class="btn danger sm" data-del="' + e.id + '">刪除</button></td></tr>').join('');
-    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="8" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
+    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="9" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
   }
 
   $('exam-table').addEventListener('click', async e => {
@@ -114,7 +115,8 @@
   $('cancel-exam').addEventListener('click', () => $('exam-form').classList.add('hidden'));
 
   async function openExamForm(id) {
-    questions = await call('GET', '/api/admin/questions');
+    let classList;
+    [questions, classList] = await Promise.all([call('GET', '/api/admin/questions'), call('GET', '/api/admin/classes')]);
     editingExam = id;
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
@@ -138,6 +140,15 @@
     $('e-shuffle-q').value = e.shuffle_q ? '1' : '0';
     $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
     $('e-published').checked = !!e.published;
+    // 已設定但班級被刪掉的名稱也列出來，存檔前看得到
+    const chosen = e.class_names ? e.class_names.split(',').map(x => x.trim()).filter(Boolean) : [];
+    const names = classList.classes.map(c => c.name);
+    chosen.forEach(n => { if (!names.includes(n)) names.push(n); });
+    $('e-classes').innerHTML = names.map(n => {
+      const c = classList.classes.find(x => x.name === n);
+      return '<label class="check"><input type="checkbox" value="' + esc(n) + '"' + (chosen.includes(n) ? ' checked' : '') + '> ' + esc(n) +
+        ' <span class="muted">' + (c ? c.students + ' 人' : '（班級已不存在）') + '</span></label>';
+    }).join('') || '<span class="muted">還沒有班級，到「名單」新增。</span>';
     $('e-ips').value = e.allowed_ips;
     $('e-focus').value = e.focus_mode;
     $('e-focus-limit').value = e.focus_limit;
@@ -209,7 +220,8 @@
     const body = {
       title: $('e-title').value, duration_min: +$('e-duration').value,
       start_at: $('e-start-on').checked ? $('e-start').value : '',
-      end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: '',
+      end_at: $('e-end-on').checked ? $('e-end').value : '',
+      class_names: [...document.querySelectorAll('#e-classes input:checked')].map(i => i.value).join(','),
       show_mode: $('e-show').value, review_when: $('e-review').value, review_at: $('e-review-at').value,
       allow_review: $('e-allow-review').value !== 'no',
       review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
@@ -696,6 +708,8 @@
     $('seat-devices').innerHTML = d.devices.length
       ? '這場考試記錄到的電腦代碼：<span style="font-family:var(--mono)">' + d.devices.map(esc).join('、') + '</span>' : '這場考試沒有學生設定電腦代碼，座位表請填學號。';
     $('seat-prev').classList.toggle('hidden', !d.previous || !!d.seat_map);
+    $('seat-owner').innerHTML = d.owner ? '這是班級「<b>' + esc(d.owner) + '</b>」的座位表，在這裡修改會套用到這個班的每一場考試（也可以到「名單」頁編輯）。'
+      : '這場考試開放給多個班級或不限班級，座位表只存在這場考試。';
     if (d.previous) $('seat-prev').textContent = '套用「' + d.previous.title + '」的座位表';
     $('seat-result').classList.toggle('hidden', !d.grid.length);
     if (!d.grid.length) return;
@@ -941,27 +955,159 @@
     e.target.value = '';
   });
 
-  // ── 名單 ──
+  // ── 名單與班級 ──
+
+  let classes = { classes: [], unassigned: 0, total: 0 };
+  let students = [];
+  let currentClass = null;     // null = 全部、'' = 未分班、其他 = 班級名稱
+  let editingStudent = null;
 
   async function loadStudents() {
-    const list = await call('GET', '/api/admin/students');
-    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>密碼</th><th></th></tr>' +
-      list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
-        '<td>' + (s.has_password ? '<span class="badge ok">已設定</span>' : '<span class="badge gray">未設定</span>') + '</td>' +
-        '<td class="row">' + (s.has_password ? '<button class="btn ghost sm" data-spw="' + esc(s.student_id) + '" data-name="' + esc(s.name) + '">重設密碼</button>' : '') +
-        '<button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('');
-    say('s-msg', '共 ' + list.length + ' 人', true);
+    [classes, students] = await Promise.all([call('GET', '/api/admin/classes'), call('GET', '/api/admin/students')]);
+    if (currentClass && !classes.classes.some(c => c.name === currentClass)) currentClass = null;
+    renderClasses();
+    renderStudents();
   }
+
+  const classInfo = name => classes.classes.find(c => c.name === name);
+
+  function renderClasses() {
+    const tab = (value, label, n) => '<button data-class="' + esc(value) + '" class="' + (currentClass === value ? 'active' : '') + '">' +
+      esc(label) + '<span class="n">' + n + '</span></button>';
+    $('class-tabs').innerHTML = '<button data-class="__all" class="' + (currentClass === null ? 'active' : '') + '">全部<span class="n">' + classes.total + '</span></button>' +
+      classes.classes.map(c => tab(c.name, c.name, c.students)).join('') +
+      (classes.unassigned ? tab('', '未分班', classes.unassigned) : '');
+    const c = currentClass ? classInfo(currentClass) : null;
+    $('class-card').classList.toggle('hidden', !c);
+    if (c) {
+      $('class-title').textContent = c.name;
+      $('class-info').textContent = c.students + ' 位學生・座位表' + (c.seats ? '已設定 ' + c.seats + ' 個座位' : '尚未設定') +
+        '・開放給這班的考試 ' + c.exams + ' 場';
+    } else {
+      $('class-seats').classList.add('hidden');
+    }
+    $('s-class').innerHTML = '<option value="">（未分班）</option>' +
+      classes.classes.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+    if (!editingStudent) $('s-class').value = currentClass || '';
+    $('import-target').textContent = currentClass ? '→ 匯入到「' + currentClass + '」' : '→ 依檔案裡的班級欄（沒有就是未分班）';
+    $('s-replace-text').textContent = currentClass ? '先清除「' + currentClass + '」的舊名單' : '先清除所有舊名單';
+  }
+
+  function renderStudents() {
+    const q = $('s-search').value.trim().toLowerCase();
+    const list = students.filter(s => (currentClass === null || s.class_name === currentClass) &&
+      (!q || (s.student_id + ' ' + s.name).toLowerCase().includes(q)));
+    const options = cls => '<option value="">（未分班）</option>' + classes.classes.map(c =>
+      '<option value="' + esc(c.name) + '"' + (c.name === cls ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('');
+    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>班級</th><th>密碼</th><th></th></tr>' +
+      (list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
+        '<td><select class="inline-select" data-move="' + esc(s.student_id) + '">' + options(s.class_name) + '</select></td>' +
+        '<td>' + (s.has_password ? '<span class="badge ok">已設定</span>' : '<span class="badge gray">未設定</span>') + '</td>' +
+        '<td class="row"><button class="btn ghost sm" data-sedit="' + esc(s.student_id) + '">編輯</button>' +
+        (s.has_password ? '<button class="btn ghost sm" data-spw="' + esc(s.student_id) + '" data-name="' + esc(s.name) + '">重設密碼</button>' : '') +
+        '<button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('') ||
+        '<tr><td colspan="5" class="muted">沒有學生</td></tr>');
+    $('s-count').textContent = list.length + ' 人';
+  }
+
+  $('s-search').addEventListener('input', renderStudents);
+  $('class-tabs').addEventListener('click', e => {
+    const b = e.target.closest('[data-class]');
+    if (!b) return;
+    currentClass = b.dataset.class === '__all' ? null : b.dataset.class;
+    $('class-seats').classList.add('hidden');
+    cancelEdit();
+    renderClasses();
+    renderStudents();
+  });
+
+  $('new-class').addEventListener('click', async () => {
+    const name = prompt('新班級名稱（例如 資管一甲）');
+    if (!name) return;
+    try {
+      const r = await call('POST', '/api/admin/classes', { name });
+      currentClass = r.name;
+      await loadStudents();
+      say('s-msg', '已新增「' + r.name + '」，可以匯入名單或逐一新增學生', true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('class-rename').addEventListener('click', async () => {
+    const name = prompt('把「' + currentClass + '」改名為', currentClass);
+    if (!name || name === currentClass) return;
+    try {
+      const r = await call('PUT', '/api/admin/classes/' + encodeURIComponent(currentClass), { name });
+      currentClass = r.name;
+      await loadStudents();
+      say('s-msg', '已改名；學生與考試的開放班級都一起更新', true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('class-delete').addEventListener('click', async () => {
+    const c = classInfo(currentClass);
+    const ok = await ask('刪除班級「' + c.name + '」',
+      '<p>這個班有 ' + c.students + ' 位學生' + (c.exams ? '，' + c.exams + ' 場考試開放給這個班（會改成不限班級，請記得重新設定）' : '') + '。</p>' +
+      '<label class="check"><input type="radio" name="del-mode" value="keep" checked> 學生保留，移到「未分班」</label><br>' +
+      '<label class="check"><input type="radio" name="del-mode" value="delete"> 連學生一起刪除（有作答紀錄的會保留在未分班）</label>',
+      '刪除班級', '取消');
+    if (!ok) return;
+    const mode = document.querySelector('[name=del-mode]:checked').value;
+    try {
+      const r = await call('DELETE', '/api/admin/classes/' + encodeURIComponent(c.name) + '?students=' + mode);
+      currentClass = null;
+      await loadStudents();
+      say('s-msg', '已刪除班級' + (r.deleted ? '，刪除 ' + r.deleted + ' 位學生' : '') + (r.unassigned ? '，' + r.unassigned + ' 位移到未分班' : ''), true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  // 學生：新增／編輯（同一個表單）、改班、重設密碼、刪除
+  function cancelEdit() {
+    editingStudent = null;
+    $('s-form-title').textContent = '新增學生';
+    $('add-s').textContent = '新增';
+    $('s-id').readOnly = false;
+    $('s-id').value = $('s-name').value = '';
+    $('cancel-s').classList.add('hidden');
+    $('s-class').value = currentClass || '';
+  }
+  $('cancel-s').addEventListener('click', cancelEdit);
 
   $('add-s').addEventListener('click', async () => {
     try {
-      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value });
-      $('s-id').value = $('s-name').value = '';
+      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value, class_name: $('s-class').value });
+      say('s-msg', (editingStudent ? '已更新 ' : '已新增 ') + $('s-id').value.trim(), true);
+      cancelEdit();
+      loadStudents();
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('s-table').addEventListener('change', async e => {
+    const sid = e.target.dataset.move;
+    if (!sid) return;
+    const s = students.find(x => x.student_id === sid);
+    try {
+      await call('POST', '/api/admin/students', { student_id: sid, name: s.name, class_name: e.target.value });
+      say('s-msg', s.name + ' 改到「' + (e.target.value || '未分班') + '」', true);
       loadStudents();
     } catch (err) { say('s-msg', err.message); }
   });
 
   $('s-table').addEventListener('click', async e => {
+    const edit = e.target.dataset.sedit;
+    if (edit) {
+      const s = students.find(x => x.student_id === edit);
+      editingStudent = edit;
+      $('s-form-title').textContent = '編輯學生';
+      $('add-s').textContent = '儲存';
+      $('s-id').value = s.student_id;
+      $('s-id').readOnly = true;
+      $('s-name').value = s.name;
+      $('s-class').value = s.class_name;
+      $('cancel-s').classList.remove('hidden');
+      $('s-name').focus();
+      $('s-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     const reset = e.target.dataset.spw;
     if (reset && confirm('清除「' + e.target.dataset.name + '」的密碼？清除後只輸入學號就能登入，學生可以再自己設定新密碼。')) {
       try { await call('POST', '/api/admin/students/' + encodeURIComponent(reset) + '/reset-password'); loadStudents(); }
@@ -987,16 +1133,59 @@
   $('s-file').addEventListener('change', async e => {
     const f = e.target.files[0];
     if (!f) return;
-    const opts = { replace: $('s-replace').checked };
+    const opts = { replace: $('s-replace').checked, class_name: currentClass || '' };
     try {
       const r = /\.xlsx$/i.test(f.name)
         ? await call('POST', '/api/admin/students/import-xlsx', Object.assign({ data: await readBase64(e.target) }, opts))
         : await call('POST', '/api/admin/students/import', Object.assign({ csv: await readFile(e.target) }, opts));
       await loadStudents();
-      say('s-msg', '匯入 ' + r.count + ' 人', true);
+      say('s-msg', '匯入 ' + r.count + ' 人' + (currentClass ? '到「' + currentClass + '」' : ''), true);
     } catch (err) { say('s-msg', err.message); }
     e.target.value = '';
   });
+
+  // 班級座位表
+  $('class-seats-btn').addEventListener('click', async () => {
+    renderClassSeats(await call('GET', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats'));
+    $('class-seat-msg').textContent = '';
+    $('class-seats').classList.remove('hidden');
+    $('class-seats').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $('class-seat-close').addEventListener('click', () => $('class-seats').classList.add('hidden'));
+  $('class-seat-save').addEventListener('click', async () => {
+    try {
+      renderClassSeats(await call('PUT', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats', { seat_map: $('class-seat-map').value }));
+      say('class-seat-msg', '已儲存', true);
+      loadStudents();
+    } catch (err) { say('class-seat-msg', err.message); }
+  });
+  $('class-seat-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const d = await call('POST', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats/import', { data: await readBase64(e.target), filename: f.name });
+      renderClassSeats(d);
+      const n = d.grid.flat().filter(x => x).length;
+      say('class-seat-msg', '已匯入「' + f.name + '」：' + d.grid.length + ' 排、' + n + ' 個座位', true);
+      loadStudents();
+    } catch (err) { say('class-seat-msg', err.message); }
+    e.target.value = '';
+  });
+
+  function renderClassSeats(d) {
+    $('class-seats-name').textContent = d.name;
+    $('class-seat-map').value = d.seat_map;
+    const C = d.grid.length ? d.grid[0].length : 0;
+    $('class-seat-grid').style.gridTemplateColumns = 'repeat(' + C + ', auto)';
+    $('class-seat-grid').style.gap = '8px';
+    $('class-seat-grid').innerHTML = d.grid.map(row => row.map(c => !c ? '<div class="seat aisle" style="width:92px"></div>' :
+      '<div class="seat' + (c.known ? '' : ' unknown') + '" title="' + esc(c.label) + '"><div class="pc">' + esc(c.code) + '</div>' +
+      '<div class="nm">' + esc(c.name || '—') + '</div>' + (c.known ? '' : '<div class="sc">名單上沒有</div>') + '</div>').join('')).join('');
+    const notes = [];
+    if (d.unknown.length) notes.push('<span style="color:var(--ng)">名單上找不到的學號（' + d.unknown.length + '）：' + d.unknown.map(esc).join('、') + '</span>');
+    if (d.unseated.length) notes.push('名單上有、但沒排座位（' + d.unseated.length + '）：' + d.unseated.map(s => esc(s.name) + '（' + esc(s.student_id) + '）').join('、'));
+    $('class-seat-notes').innerHTML = notes.join('<br>');
+  }
 
   if (token) openTab('exams'); else show('login');
 })();

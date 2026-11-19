@@ -785,7 +785,13 @@ def upsert_student(body: StudentIn, db=Depends(get_db)):
                "ON CONFLICT (student_id) DO UPDATE SET "
                "name = excluded.name, class_name = excluded.class_name",
                (body.student_id.strip(), body.name.strip(), body.class_name.strip()))
+    ensure_class(db, body.class_name)
     return {"ok": True}
+
+
+def ensure_class(db, name: str) -> None:
+    if name.strip():
+        db.execute("INSERT OR IGNORE INTO classes (name) VALUES (?)", (name.strip(),))
 
 
 def save_roster(db, rows: list[tuple[str, str, str]], replace: bool, class_name: str) -> int:
@@ -794,13 +800,16 @@ def save_roster(db, rows: list[tuple[str, str, str]], replace: bool, class_name:
     db.execute("BEGIN")
     try:
         if replace:
-            db.execute("DELETE FROM students WHERE student_id NOT IN "
-                       "(SELECT student_id FROM attempts)")
+            # 有指定班級時只清這一班，不會動到其他班的名單
+            sql = "DELETE FROM students WHERE student_id NOT IN (SELECT student_id FROM attempts)"
+            db.execute(sql + " AND class_name = ?" if class_name.strip() else sql,
+                       (class_name.strip(),) if class_name.strip() else ())
         for sid, name, cls in rows:
             db.execute("INSERT INTO students (student_id, name, class_name) VALUES (?, ?, ?) "
                        "ON CONFLICT (student_id) "
                        "DO UPDATE SET name = excluded.name, class_name = excluded.class_name",
                        (sid, name, class_name.strip() or cls))
+            ensure_class(db, class_name.strip() or cls)
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -826,6 +835,173 @@ def import_students_xlsx(body: XlsxIn, db=Depends(get_db)):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "count": save_roster(db, rows, body.replace, body.class_name)}
+
+
+# ── 班級 ──
+
+
+class ClassIn(BaseModel):
+    name: str
+
+
+class SeatMapIn(BaseModel):
+    seat_map: str
+
+
+class SeatFileIn(BaseModel):
+    data: str              # base64
+    filename: str
+
+
+def class_or_404(db, name: str) -> sqlite3.Row:
+    row = db.execute("SELECT * FROM classes WHERE name = ?", (name,)).fetchone()
+    if not row:
+        raise HTTPException(404, "找不到這個班級")
+    return row
+
+
+def valid_class_name(name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise HTTPException(400, "班級名稱不能空白")
+    if len(name) > 40 or "," in name:
+        raise HTTPException(400, "班級名稱最多 40 字，不能有逗號")
+    return name
+
+
+def exams_of_class(db, name: str) -> list[sqlite3.Row]:
+    return [e for e in db.execute("SELECT id, title, class_names FROM exams")
+            if name in class_list(e["class_names"])]
+
+
+@app.get("/api/admin/classes", dependencies=[admin])
+def list_classes(db=Depends(get_db)):
+    counts = dict(db.execute("SELECT class_name, COUNT(*) FROM students GROUP BY class_name").fetchall())
+    out = []
+    for c in db.execute("SELECT * FROM classes ORDER BY name"):
+        grid = parse_seat_map(c["seat_map"])
+        out.append({"name": c["name"], "students": counts.get(c["name"], 0),
+                    "seats": sum(1 for r in grid for x in r if x),
+                    "exams": len(exams_of_class(db, c["name"]))})
+    return {"classes": out, "unassigned": counts.get("", 0), "total": sum(counts.values())}
+
+
+@app.post("/api/admin/classes", dependencies=[admin])
+def create_class(body: ClassIn, db=Depends(get_db)):
+    name = valid_class_name(body.name)
+    if db.execute("SELECT 1 FROM classes WHERE name = ?", (name,)).fetchone():
+        raise HTTPException(409, "已經有這個班級")
+    db.execute("INSERT INTO classes (name) VALUES (?)", (name,))
+    return {"ok": True, "name": name}
+
+
+@app.put("/api/admin/classes/{name}", dependencies=[admin])
+def rename_class(name: str, body: ClassIn, db=Depends(get_db)):
+    class_or_404(db, name)
+    new = valid_class_name(body.name)
+    if new == name:
+        return {"ok": True, "name": new}
+    if db.execute("SELECT 1 FROM classes WHERE name = ?", (new,)).fetchone():
+        raise HTTPException(409, "已經有這個班級")
+    db.execute("BEGIN")
+    try:
+        db.execute("UPDATE classes SET name = ? WHERE name = ?", (new, name))
+        db.execute("UPDATE students SET class_name = ? WHERE class_name = ?", (new, name))
+        # 考試的「開放班級」一起改名，不然改名後學生會看不到考試
+        for e in exams_of_class(db, name):
+            names = [new if c == name else c for c in class_list(e["class_names"])]
+            db.execute("UPDATE exams SET class_names = ? WHERE id = ?", (",".join(names), e["id"]))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return {"ok": True, "name": new}
+
+
+@app.delete("/api/admin/classes/{name}", dependencies=[admin])
+def delete_class(name: str, students: str = "keep", db=Depends(get_db)):
+    """students=keep：學生移到「未分班」；students=delete：連學生一起刪（有作答紀錄的保留在未分班）。"""
+    class_or_404(db, name)
+    if students not in ("keep", "delete"):
+        raise HTTPException(400, "students 只能是 keep 或 delete")
+    db.execute("BEGIN")
+    try:
+        deleted = 0
+        if students == "delete":
+            deleted = db.execute("DELETE FROM students WHERE class_name = ? AND student_id NOT IN "
+                                 "(SELECT student_id FROM attempts)", (name,)).rowcount
+        kept = db.execute("UPDATE students SET class_name = '' WHERE class_name = ?", (name,)).rowcount
+        for e in exams_of_class(db, name):
+            names = [c for c in class_list(e["class_names"]) if c != name]
+            db.execute("UPDATE exams SET class_names = ? WHERE id = ?", (",".join(names), e["id"]))
+        db.execute("DELETE FROM classes WHERE name = ?", (name,))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return {"ok": True, "deleted": deleted, "unassigned": kept}
+
+
+def class_seat_view(db, name: str) -> dict:
+    """座位表預覽：每格對應到哪位學生，標出名單上找不到的學號與沒排到座位的學生。"""
+    c = class_or_404(db, name)
+    grid = parse_seat_map(c["seat_map"])
+    roster = {r["student_id"]: r["name"] for r in db.execute(
+        "SELECT student_id, name FROM students WHERE class_name = ?", (name,))}
+    seated, unknown, cells = set(), [], []
+    for row in grid:
+        out = []
+        for label in row:
+            if not label:
+                out.append(None)
+                continue
+            code, label_name = split_label(label)
+            ok = code in roster
+            if ok:
+                seated.add(code)
+            elif SID_LIKE.match(code):
+                unknown.append(label)
+            out.append({"label": label, "code": code, "name": roster.get(code, label_name),
+                        "known": ok})
+        cells.append(out)
+    return {"name": name, "seat_map": c["seat_map"], "grid": cells, "unknown": unknown,
+            "unseated": [{"student_id": s, "name": n} for s, n in sorted(roster.items()) if s not in seated]}
+
+
+SID_LIKE = re.compile(r"^[A-Za-z]{0,4}\d{3,12}$")
+
+
+@app.get("/api/admin/classes/{name}/seats", dependencies=[admin])
+def get_class_seats(name: str, db=Depends(get_db)):
+    return class_seat_view(db, name)
+
+
+@app.put("/api/admin/classes/{name}/seats", dependencies=[admin])
+def save_class_seats(name: str, body: SeatMapIn, db=Depends(get_db)):
+    class_or_404(db, name)
+    db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (grid_text(parse_seat_map(body.seat_map)), name))
+    return class_seat_view(db, name)
+
+
+@app.post("/api/admin/classes/{name}/seats/import", dependencies=[admin])
+def import_class_seats(name: str, body: SeatFileIn, db=Depends(get_db)):
+    class_or_404(db, name)
+    db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (grid_text(read_seat_file(body)), name))
+    return class_seat_view(db, name)
+
+
+def grid_text(grid: list[list[str]]) -> str:
+    if len(grid) > 60 or any(len(r) > 40 for r in grid):
+        raise HTTPException(400, "座位表最多 60 排、每排 40 個座位")
+    # 存整理後的格子，之後在文字框裡看到、改的就是系統認得的樣子
+    return "\n".join(",".join(r) for r in grid)
+
+
+def read_seat_file(body) -> list[list[str]]:
+    try:
+        return clean_sheet(sheet_rows_from_file(base64.b64decode(body.data), body.filename))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/admin/students/{student_id}/reset-password", dependencies=[admin])
@@ -1313,15 +1489,6 @@ def attempt_log(attempt_id: int, db=Depends(get_db)):
             "questions": questions, "timeline": timeline}
 
 
-class SeatMapIn(BaseModel):
-    seat_map: str
-
-
-class SeatFileIn(BaseModel):
-    data: str              # base64
-    filename: str
-
-
 def submitted_answers(db, exam_id: int) -> tuple[dict, dict]:
     """已交卷學生的作答：學號 → {題目 id: (標準化答案, 是否答錯, 作答時間)}，以及作答紀錄列。"""
     qs = {q["id"]: q for q in exam_questions(db, exam_id)}
@@ -1341,37 +1508,47 @@ def submitted_answers(db, exam_id: int) -> tuple[dict, dict]:
     return data, attempts
 
 
+def seat_owner(db, exam: sqlite3.Row) -> str | None:
+    """只開放給一個班級的考試，座位表就是那個班級的（同班每場考試共用）；否則存在考試本身。"""
+    classes = class_list(exam["class_names"])
+    if len(classes) == 1 and db.execute("SELECT 1 FROM classes WHERE name = ?", (classes[0],)).fetchone():
+        return classes[0]
+    return None
+
+
+def store_seats(db, exam_id: int, grid: list[list[str]]) -> dict:
+    exam = exam_or_404(db, exam_id)
+    text = grid_text(grid)
+    owner = seat_owner(db, exam)
+    if owner:
+        db.execute("UPDATE classes SET seat_map = ? WHERE name = ?", (text, owner))
+        db.execute("UPDATE exams SET seat_map = '' WHERE id = ?", (exam_id,))
+    else:
+        db.execute("UPDATE exams SET seat_map = ? WHERE id = ?", (text, exam_id))
+    return seat_analysis(exam_id, db)
+
+
 @app.put("/api/admin/exams/{exam_id}/seats", dependencies=[admin])
 def save_seats(exam_id: int, body: SeatMapIn, db=Depends(get_db)):
-    exam_or_404(db, exam_id)
     return store_seats(db, exam_id, parse_seat_map(body.seat_map))
 
 
 @app.post("/api/admin/exams/{exam_id}/seats/import", dependencies=[admin])
 def import_seats(exam_id: int, body: SeatFileIn, db=Depends(get_db)):
-    exam_or_404(db, exam_id)
-    try:
-        rows = sheet_rows_from_file(base64.b64decode(body.data), body.filename)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return store_seats(db, exam_id, clean_sheet(rows))
-
-
-def store_seats(db, exam_id: int, grid: list[list[str]]) -> dict:
-    if len(grid) > 60 or any(len(r) > 40 for r in grid):
-        raise HTTPException(400, "座位表最多 60 排、每排 40 個座位")
-    # 存整理後的格子，之後在文字框裡看到、改的就是系統認得的樣子
-    text = "\n".join(",".join(r) for r in grid)
-    db.execute("UPDATE exams SET seat_map = ? WHERE id = ?", (text, exam_id))
-    return seat_analysis(exam_id, db)
+    return store_seats(db, exam_id, read_seat_file(body))
 
 
 @app.get("/api/admin/exams/{exam_id}/seats", dependencies=[admin])
 def seat_analysis(exam_id: int, db=Depends(get_db)):
     exam = exam_or_404(db, exam_id)
-    prev = db.execute("SELECT id, title, seat_map FROM exams WHERE id != ? AND seat_map != '' "
-                      "ORDER BY id DESC LIMIT 1", (exam_id,)).fetchone()
-    out = {"seat_map": exam["seat_map"], "previous": dict(prev) if prev else None,
+    owner = seat_owner(db, exam)
+    seat_map = exam["seat_map"]
+    if owner and not seat_map:
+        seat_map = db.execute("SELECT seat_map FROM classes WHERE name = ?", (owner,)).fetchone()[0]
+    prev = None if owner else db.execute(
+        "SELECT id, title, seat_map FROM exams WHERE id != ? AND seat_map != '' "
+        "ORDER BY id DESC LIMIT 1", (exam_id,)).fetchone()
+    out = {"seat_map": seat_map, "owner": owner, "previous": dict(prev) if prev else None,
            "grid": [], "pairs": [], "others": [], "unmatched": [], "unseated": []}
     data, attempts = submitted_answers(db, exam_id)
     out["devices"] = sorted({a["device"] for a in attempts.values() if a["device"]})
@@ -1380,7 +1557,7 @@ def seat_analysis(exam_id: int, db=Depends(get_db)):
     for sid, a in sorted(attempts.items(), key=lambda x: x[1]["started_at"]):
         if a["device"]:
             by_device[a["device"].strip().lower()] = sid
-    grid = parse_seat_map(exam["seat_map"])
+    grid = parse_seat_map(seat_map)
     seat_of: dict[tuple[int, int], str] = {}
     for r, row in enumerate(grid):
         cells = []

@@ -46,6 +46,8 @@ def remove(db) -> None:
                "WHERE class_name = ? AND student_id LIKE ?)", (CLASS, PREFIX + "%"))
     db.execute("DELETE FROM students WHERE class_name = ? AND student_id LIKE ?",
                (CLASS, PREFIX + "%"))
+    if not db.execute("SELECT 1 FROM students WHERE class_name = ?", (CLASS,)).fetchone():
+        db.execute("DELETE FROM classes WHERE name = ?", (CLASS,))
 
 
 def pick_questions(db, rng) -> list[int]:
@@ -203,8 +205,11 @@ def main():
         day = (datetime.now(TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
         cur = db.execute(
             "INSERT INTO exams (title, start_at, end_at, duration_min, class_names, show_mode, "
-            "review_when, published, seat_map) VALUES (?, ?, ?, 30, ?, 'explain', 'after_close', 0, ?)",
-            (TITLE, f"{day}T10:10", f"{day}T10:45", CLASS, seat_map(a.students)))
+            "review_when, published) VALUES (?, ?, ?, 30, ?, 'explain', 'after_close', 0)",
+            (TITLE, f"{day}T10:10", f"{day}T10:45", CLASS))
+        # 座位表跟著班級存，同班每場考試共用
+        db.execute("INSERT INTO classes (name, seat_map) VALUES (?, ?) "
+                   "ON CONFLICT (name) DO UPDATE SET seat_map = excluded.seat_map", (CLASS, seat_map(a.students)))
         exam_id = cur.lastrowid
         db.executemany("INSERT INTO exam_questions VALUES (?, ?, ?)",
                        [(exam_id, q, i) for i, q in enumerate(qids)])
