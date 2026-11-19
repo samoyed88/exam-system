@@ -147,15 +147,19 @@ def exam_or_404(db, exam_id: int) -> sqlite3.Row:
 
 
 def exam_questions(db, exam_id: int) -> list[sqlite3.Row]:
+    # points 用這場考試設定的配分（沒設定就用題庫預設），評分、統計、學生畫面都從這裡取
     return db.execute(
-        "SELECT q.* FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
+        "SELECT q.id, q.type, q.stem, q.code, q.options, q.answer, q.explanation, "
+        "COALESCE(eq.points, q.points) AS points, q.points AS bank_points, q.multi_mode, q.tags, q.weights "
+        "FROM exam_questions eq JOIN questions q ON q.id = eq.question_id "
         "WHERE eq.exam_id = ? ORDER BY eq.position", (exam_id,)
     ).fetchall()
 
 
 def score_answer(q: sqlite3.Row, response) -> float:
     return grade(q["type"], json.loads(q["answer"]), response, q["points"],
-                 q["multi_mode"], len(json.loads(q["options"])))
+                 q["multi_mode"], len(json.loads(q["options"])),
+                 json.loads(q["weights"]) if q["weights"] else None)
 
 
 def log_event(db, attempt_id: int, kind: str, question_id: int | None = None,
@@ -718,7 +722,8 @@ class QuestionIn(BaseModel):
     answer: list
     explanation: str = ""
     points: float = 1
-    multi_mode: str = "all"
+    multi_mode: str = "all"            # all 全對才給分、partial 學測式、weighted 依選項比重（可倒扣）
+    weights: list[float] = []          # weighted：各選項比重（百分比，例如 33.33、-16.67）
     tags: str = ""
 
 
@@ -737,6 +742,7 @@ class ExamIn(BaseModel):
     review_until: str = ""
     allowed_ips: str = ""
     published: bool = False
+    question_points: dict[int, float] = {}   # 題目 id → 這場考試的配分；沒列的用題庫預設
     focus_mode: str = "record"
     focus_limit: int = 3
     fullscreen: bool = False
@@ -1037,17 +1043,32 @@ def question_values(q: QuestionIn) -> tuple:
             raise HTTPException(400, "正確答案不在選項範圍內")
         if q.type == "single" and len(answer) != 1:
             raise HTTPException(400, "單選題只能有一個正確答案")
-    if q.multi_mode not in ("all", "partial"):
-        raise HTTPException(400, "多選計分方式只能是 all 或 partial")
+    if q.multi_mode not in ("all", "partial", "weighted"):
+        raise HTTPException(400, "多選計分方式只能是 all、partial 或 weighted")
+    weights = ""
+    if q.type == "multi" and q.multi_mode == "weighted":
+        if len(q.weights) != len(options) or any(not -100 <= w <= 100 for w in q.weights):
+            raise HTTPException(400, "每個選項都要設定比重（-100 到 100）")
+        if abs(sum(w for w in q.weights if w > 0) - 100) > 0.1:
+            raise HTTPException(400, "正確選項的比重加起來要是 100%")
+        if sorted(i for i, w in enumerate(q.weights) if w > 0) != answer:
+            raise HTTPException(400, "比重為正的選項要和正確答案一致")
+        weights = json.dumps([round(w / 100, 6) for w in q.weights])
+    # weighted 存成 partial + weights（資料表的 CHECK 限制只允許 all／partial）
+    mode = "partial" if q.multi_mode == "weighted" else q.multi_mode
     return (q.type, q.stem.strip(), q.code, json.dumps(options, ensure_ascii=False),
             json.dumps(answer, ensure_ascii=False), q.explanation, q.points,
-            q.multi_mode, q.tags)
+            mode, q.tags, weights)
 
 
 def question_dict(r: sqlite3.Row) -> dict:
     d = dict(r)
     d["options"] = json.loads(d["options"])
     d["answer"] = json.loads(d["answer"])
+    weights = json.loads(d.get("weights") or "[]")
+    d["weights"] = [round(w * 100, 4) for w in weights]
+    if weights:
+        d["multi_mode"] = "weighted"
     return d
 
 
@@ -1060,7 +1081,7 @@ def list_questions(db=Depends(get_db)):
 def create_question(body: QuestionIn, db=Depends(get_db)):
     cur = db.execute(
         "INSERT INTO questions (type, stem, code, options, answer, explanation, points, "
-        "multi_mode, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", question_values(body))
+        "multi_mode, tags, weights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", question_values(body))
     return {"ok": True, "id": cur.lastrowid}
 
 
@@ -1068,7 +1089,7 @@ def create_question(body: QuestionIn, db=Depends(get_db)):
 def update_question(qid: int, body: QuestionIn, db=Depends(get_db)):
     values = question_values(body)
     db.execute("UPDATE questions SET type = ?, stem = ?, code = ?, options = ?, answer = ?, "
-               "explanation = ?, points = ?, multi_mode = ?, tags = ? WHERE id = ?",
+               "explanation = ?, points = ?, multi_mode = ?, tags = ?, weights = ? WHERE id = ?",
                (*values, qid))
     regrade_question(db, qid)
     return {"ok": True}
@@ -1104,7 +1125,9 @@ def parse_csv_question(r: dict) -> QuestionIn:
     return QuestionIn(type=qtype, stem=r.get("stem", ""), code=r.get("code", ""),
                       options=options, answer=answer, explanation=r.get("explanation", ""),
                       points=float(r.get("points") or 1),
-                      multi_mode=r.get("multi_mode") or "all", tags=r.get("tags", ""))
+                      multi_mode=r.get("multi_mode") or "all", tags=r.get("tags", ""),
+                      # weights 欄：各選項比重以 ; 分隔，例如 33.33;-16.67;33.33;33.33
+                      weights=[float(w) for w in (r.get("weights") or "").split(";") if w.strip()])
 
 
 @app.post("/api/admin/questions/import", dependencies=[admin])
@@ -1121,7 +1144,7 @@ def import_questions(body: CsvIn, db=Depends(get_db)):
     db.execute("BEGIN")
     db.executemany(
         "INSERT INTO questions (type, stem, code, options, answer, explanation, points, "
-        "multi_mode, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
+        "multi_mode, tags, weights) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values)
     db.execute("COMMIT")
     return {"ok": True, "count": len(values)}
 
@@ -1161,7 +1184,7 @@ def exam_values(e: ExamIn) -> tuple:
 FOCUS_MODES = ("record", "warn", "lock", "submit")
 
 
-def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
+def set_exam_questions(db, exam_id: int, ids: list[int], points: dict[int, float]) -> None:
     db.execute("DELETE FROM exam_questions WHERE exam_id = ?", (exam_id,))
     seen = set()
     for pos, qid in enumerate(ids):
@@ -1170,7 +1193,15 @@ def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
         seen.add(qid)
         if not db.execute("SELECT 1 FROM questions WHERE id = ?", (qid,)).fetchone():
             raise HTTPException(400, f"題目 {qid} 不存在")
-        db.execute("INSERT INTO exam_questions VALUES (?, ?, ?)", (exam_id, qid, pos))
+        db.execute("INSERT INTO exam_questions (exam_id, question_id, position, points) VALUES (?, ?, ?, ?)",
+                   (exam_id, qid, pos, exam_point(points, qid)))
+
+
+def exam_point(points: dict[int, float], qid: int) -> float | None:
+    p = points.get(qid)
+    if p is not None and not 0 < p <= 1000:
+        raise HTTPException(400, "配分要大於 0、最多 1000")
+    return p
 
 
 EXAM_COLS = ("title, start_at, end_at, duration_min, class_names, shuffle_q, shuffle_opt, "
@@ -1191,6 +1222,8 @@ def list_exams(db=Depends(get_db)):
 def get_exam(exam_id: int, db=Depends(get_db)):
     d = dict(exam_or_404(db, exam_id))
     d["question_ids"] = [q["id"] for q in exam_questions(db, exam_id)]
+    d["question_points"] = {r["question_id"]: r["points"] for r in db.execute(
+        "SELECT question_id, points FROM exam_questions WHERE exam_id = ? AND points IS NOT NULL", (exam_id,))}
     return d
 
 
@@ -1201,7 +1234,7 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     try:
         marks = ", ".join("?" * len(values))
         cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES ({marks})", values)
-        set_exam_questions(db, cur.lastrowid, body.question_ids)
+        set_exam_questions(db, cur.lastrowid, body.question_ids, body.question_points)
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -1222,7 +1255,14 @@ def update_exam(exam_id: int, body: ExamIn, db=Depends(get_db)):
         sets = ", ".join(f"{c.strip()} = ?" for c in EXAM_COLS.split(","))
         db.execute(f"UPDATE exams SET {sets} WHERE id = ?", (*values, exam_id))
         if not has_attempts:
-            set_exam_questions(db, exam_id, body.question_ids)
+            set_exam_questions(db, exam_id, body.question_ids, body.question_points)
+        else:
+            # 已有人作答時題目不能改，但可以調整配分，調完重新計算所有人的分數
+            for qid in current:
+                db.execute("UPDATE exam_questions SET points = ? WHERE exam_id = ? AND question_id = ?",
+                           (exam_point(body.question_points, qid), exam_id, qid))
+            for a in db.execute("SELECT id FROM attempts WHERE exam_id = ?", (exam_id,)).fetchall():
+                regrade(db, a["id"])
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")

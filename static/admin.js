@@ -8,6 +8,7 @@
   let questions = [];
   let editingExam = null;
   let picked = [];
+  let pickedPoints = {};       // 題目 id → 這場考試的配分（空 = 題庫預設）
   let editingQ = null;
   let monitorExam = null;
   let monitorTimer = null;
@@ -157,6 +158,7 @@
     syncFocus();
     $('e-filter').value = '';
     picked = e.question_ids.slice();
+    pickedPoints = Object.assign({}, e.question_points || {});
     renderPicker();
     $('exam-msg').textContent = '';
     $('exam-form').classList.remove('hidden');
@@ -195,11 +197,37 @@
         '<span>' + (n >= 0 ? '<b>' + (n + 1) + '.</b> ' : '') + '<span class="badge">' + TYPE_TEXT[q.type] + '</span> ' +
         esc(q.stem.slice(0, 80)) + ' <span class="muted">' + esc(q.tags) + '・' + q.points + ' 分</span></span></label>';
     }).join('') || '<p class="muted">題庫是空的。</p>';
-    const pts = picked.reduce((s, id) => s + ((questions.find(q => q.id === id) || {}).points || 0), 0);
-    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + pts + ' 分';
+    const pointOf = id => pickedPoints[id] != null && pickedPoints[id] !== '' ? +pickedPoints[id] : ((questions.find(q => q.id === id) || {}).points || 0);
+    const pts = picked.reduce((s, id) => s + pointOf(id), 0);
+    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + Math.round(pts * 100) / 100 + ' 分';
+    $('e-picked-wrap').classList.toggle('hidden', !picked.length);
+    $('e-picked-list').innerHTML = '<tr><th style="width:56px">順序</th><th>題目</th><th style="width:150px">配分</th><th style="width:96px"></th></tr>' +
+      picked.map((id, n) => {
+        const q = questions.find(x => x.id === id) || { stem: '（題目已刪除）', tags: '', points: 0, type: 'single' };
+        const v = pickedPoints[id] != null ? pickedPoints[id] : '';
+        return '<tr><td>' + (n + 1) + '</td><td><span class="badge">' + TYPE_TEXT[q.type] + '</span> ' + esc(q.stem.slice(0, 60)) +
+          ' <span class="muted">' + esc(q.tags) + '</span></td>' +
+          '<td><input type="number" class="cut-input" min="0" step="any" data-pts="' + id + '" value="' + esc(v) + '" placeholder="' + q.points + '"> 分</td>' +
+          '<td class="row"><button class="btn ghost sm" data-up="' + n + '"' + (n ? '' : ' disabled') + '>↑</button>' +
+          '<button class="btn ghost sm" data-down="' + n + '"' + (n < picked.length - 1 ? '' : ' disabled') + '>↓</button></td></tr>';
+      }).join('');
   }
 
   $('e-filter').addEventListener('input', renderPicker);
+  $('e-picked-list').addEventListener('change', e => {
+    const id = e.target.dataset.pts;
+    if (!id) return;
+    if (e.target.value === '') delete pickedPoints[id]; else pickedPoints[id] = +e.target.value;
+    renderPicker();
+  });
+  $('e-picked-list').addEventListener('click', e => {
+    const up = e.target.dataset.up, down = e.target.dataset.down;
+    const i = up != null ? +up : down != null ? +down : -1;
+    if (i < 0) return;
+    const j = up != null ? i - 1 : i + 1;
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+    renderPicker();
+  });
   $('e-questions').addEventListener('change', e => {
     const id = +e.target.value;
     if (!id) return;
@@ -227,6 +255,7 @@
       review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
       shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
+      question_points: Object.fromEntries(picked.filter(id => pickedPoints[id] != null && pickedPoints[id] !== '').map(id => [id, +pickedPoints[id]])),
       focus_mode: $('e-focus').value, focus_limit: +$('e-focus-limit').value || 3,
       fullscreen: $('e-fullscreen').checked, block_copy: $('e-block-copy').checked,
     };
@@ -870,7 +899,7 @@
     const f = $('q-filter').value;
     const list = questions.filter(q => qMatches(q, f));
     $('q-table').innerHTML = '<tr><th>#</th><th>題型</th><th>題幹</th><th>答案</th><th>分數</th><th>標籤</th><th></th></tr>' +
-      list.map(q => '<tr><td>' + q.id + '</td><td>' + TYPE_TEXT[q.type] + (q.type === 'multi' && q.multi_mode === 'partial' ? '（部分給分）' : '') + '</td>' +
+      list.map(q => '<tr><td>' + q.id + '</td><td>' + TYPE_TEXT[q.type] + (q.type !== 'multi' ? '' : q.multi_mode === 'partial' ? '（部分給分）' : q.multi_mode === 'weighted' ? '（倒扣）' : '') + '</td>' +
         '<td>' + esc(q.stem.slice(0, 100)) + '</td><td>' + esc(answerText(q)) + '</td><td>' + q.points + '</td>' +
         '<td>' + esc(q.tags) + '</td><td class="row"><button class="btn ghost sm" data-qedit="' + q.id + '">編輯</button>' +
         '<button class="btn danger sm" data-qdel="' + q.id + '">刪除</button></td></tr>').join('');
@@ -880,11 +909,13 @@
   $('new-q').addEventListener('click', () => openQForm(null));
   $('cancel-q').addEventListener('click', () => $('q-form').classList.add('hidden'));
   $('q-type').addEventListener('change', syncQType);
+  $('q-multi').addEventListener('change', syncQType);
 
   function syncQType() {
     const t = $('q-type').value;
     $('q-opt-wrap').classList.toggle('hidden', t === 'fill');
     $('q-multi-wrap').classList.toggle('hidden', t !== 'multi');
+    $('q-weights-wrap').classList.toggle('hidden', t !== 'multi' || $('q-multi').value !== 'weighted');
     $('q-answer-label').textContent = {
       single: '正確答案（一個字母，例如 B）',
       multi: '正確答案（用分號分隔，例如 A;C）',
@@ -899,6 +930,7 @@
     $('q-type').value = q.type;
     $('q-points').value = q.points;
     $('q-multi').value = q.multi_mode;
+    $('q-weights').value = (q.weights || []).map(w => +w.toFixed(4)).join(';');
     $('q-tags').value = q.tags;
     $('q-stem').value = q.stem;
     $('q-code').value = q.code;
@@ -923,6 +955,7 @@
       options: $('q-options').value.split('\n').map(s => s.trim()).filter(Boolean),
       answer, explanation: $('q-explain').value, points: +$('q-points').value,
       multi_mode: $('q-multi').value, tags: $('q-tags').value,
+      weights: $('q-multi').value === 'weighted' ? $('q-weights').value.split(/[;,\s]+/).filter(Boolean).map(Number) : [],
     };
     try {
       if (editingQ) await call('PUT', '/api/admin/questions/' + editingQ, body);

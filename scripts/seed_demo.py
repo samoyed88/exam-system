@@ -211,7 +211,7 @@ def main():
         db.execute("INSERT INTO classes (name, seat_map) VALUES (?, ?) "
                    "ON CONFLICT (name) DO UPDATE SET seat_map = excluded.seat_map", (CLASS, seat_map(a.students)))
         exam_id = cur.lastrowid
-        db.executemany("INSERT INTO exam_questions VALUES (?, ?, ?)",
+        db.executemany("INSERT INTO exam_questions (exam_id, question_id, position) VALUES (?, ?, ?)",
                        [(exam_id, q, i) for i, q in enumerate(qids)])
         exam = db.execute("SELECT * FROM exams WHERE id = ?", (exam_id,)).fetchone()
         difficulty = {q: rng.gauss(-.3, .9) for q in qids}

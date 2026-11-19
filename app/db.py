@@ -132,6 +132,10 @@ MIGRATIONS = [
     ("exams", "block_copy", "INTEGER NOT NULL DEFAULT 0"),
     ("exams", "seat_map", "TEXT NOT NULL DEFAULT ''"),
     ("attempts", "locked", "INTEGER NOT NULL DEFAULT 0"),
+    # 多選依選項比重計分（Moodle 式，可倒扣）：JSON 各選項比重，例如 [0.3333, -0.1667, ...]；
+    # 有值時優先於 multi_mode（multi_mode 的 CHECK 限制改不了，API 對外稱為 weighted）
+    ("questions", "weights", "TEXT NOT NULL DEFAULT ''"),
+    ("exam_questions", "points", "REAL"),          # 這場考試的配分；NULL = 用題庫預設配分
 ]
 
 

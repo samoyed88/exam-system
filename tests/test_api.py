@@ -890,3 +890,47 @@ def test_class_seat_map_shared_by_exams(client):
     client.put(f"/api/admin/exams/{exam_id}/seats", json={"seat_map": "15130841,15131586"}, headers=h)
     assert client.get("/api/admin/classes/資管一乙/seats", headers=h).json()["seat_map"] == "15130841,15131586"
     assert client.get("/api/admin/classes/資管一乙/seats", headers=h).json()["unseated"] == []
+
+
+# ── 依選項比重計分（Moodle 式倒扣）與每場考試的配分 ──
+
+def test_grade_weighted_multi():
+    w = [1 / 3, -1 / 6, 1 / 3, 1 / 3]            # CH07.1-28：三個正確各 +33.33%，錯的 -16.67%
+    assert grade("multi", [0, 2, 3], [0, 2, 3], 12, weights=w) == pytest.approx(12)
+    assert grade("multi", [0, 2, 3], [0, 2], 12, weights=w) == pytest.approx(8)
+    assert grade("multi", [0, 2, 3], [0, 1, 2, 3], 12, weights=w) == pytest.approx(10)
+    assert grade("multi", [0, 2, 3], [0, 1], 12, weights=w) == pytest.approx(2)
+    assert grade("multi", [0, 2, 3], [1], 12, weights=w) == 0     # 最低 0 分，不會變負分
+
+
+def test_weighted_question_and_exam_points(client):
+    h, exam_id = setup_exam(client)
+    q = {"type": "multi", "stem": "以下何者有錯？", "options": ["a", "b", "c", "d"], "answer": [0, 2, 3],
+         "points": 2, "multi_mode": "weighted", "weights": [33.33333, -16.66667, 33.33333, 33.33333]}
+    qid = client.post("/api/admin/questions", json=q, headers=h).json()["id"]
+    saved = next(x for x in client.get("/api/admin/questions", headers=h).json() if x["id"] == qid)
+    assert saved["multi_mode"] == "weighted" and saved["weights"][1] == pytest.approx(-16.6667, abs=1e-3)
+    bad = dict(q, weights=[50, -10, 20, 20])
+    assert client.post("/api/admin/questions", json=bad, headers=h).status_code == 400
+    bad = dict(q, weights=[50, 50])
+    assert client.post("/api/admin/questions", json=bad, headers=h).status_code == 400
+    # 這場考試把這題設為 12 分、第 1 題設為 24 分；題庫配分不變
+    exam = {"title": "7.1 一維陣列", "published": True, "question_ids": [1, qid],
+            "question_points": {"1": 24, str(qid): 12}}
+    eid = client.post("/api/admin/exams", json=exam, headers=h).json()["id"]
+    got = client.get(f"/api/admin/exams/{eid}", headers=h).json()
+    assert got["question_points"] == {"1": 24, str(qid): 12}
+    s = student_headers(client, "11201")
+    st = client.post(f"/api/exams/{eid}/start", json={}, headers=s).json()
+    assert {x["id"]: x["points"] for x in st["questions"]} == {1: 24, qid: 12}
+    client.put(f"/api/attempts/{st['attempt_id']}/answers", json={"question_id": qid, "response": [0, 1, 2, 3]}, headers=s)
+    r = client.post(f"/api/attempts/{st['attempt_id']}/submit", headers=s).json()
+    assert r["score"] == pytest.approx(10) and r["max_score"] == 36
+    # 已有人作答後仍可改配分，會重算分數
+    got.update(question_points={"1": 24, str(qid): 6})
+    assert client.put(f"/api/admin/exams/{eid}", json=got, headers=h).status_code == 200
+    sc = client.get(f"/api/admin/exams/{eid}/scores", headers=h).json()
+    assert sc["max_score"] == 30 and sc["rows"][0]["score"] == pytest.approx(5)
+    assert next(x for x in client.get("/api/admin/questions", headers=h).json() if x["id"] == qid)["points"] == 2
+    got.update(question_points={"1": 0})
+    assert client.put(f"/api/admin/exams/{eid}", json=got, headers=h).status_code == 400
