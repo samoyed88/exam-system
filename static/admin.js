@@ -198,9 +198,7 @@
         '<span>' + (n >= 0 ? '<b>' + (n + 1) + '.</b> ' : '') + '<span class="badge">' + TYPE_TEXT[q.type] + '</span> ' +
         esc(q.stem.slice(0, 80)) + ' <span class="muted">' + esc(q.tags) + '・' + q.points + ' 分</span></span></label>';
     }).join('') || '<p class="muted">題庫是空的。</p>';
-    const pointOf = id => pickedPoints[id] != null && pickedPoints[id] !== '' ? +pickedPoints[id] : ((questions.find(q => q.id === id) || {}).points || 0);
-    const pts = picked.reduce((s, id) => s + pointOf(id), 0);
-    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + Math.round(pts * 100) / 100 + ' 分';
+    updatePickedTotal();
     $('e-picked-wrap').classList.toggle('hidden', !picked.length);
     $('e-picked-list').innerHTML = '<tr><th style="width:56px">順序</th><th>題目</th><th style="width:150px">配分</th><th style="width:96px"></th></tr>' +
       picked.map((id, n) => {
@@ -214,12 +212,19 @@
       }).join('');
   }
 
+  function updatePickedTotal() {
+    const pointOf = id => pickedPoints[id] != null && pickedPoints[id] !== '' ? +pickedPoints[id] : ((questions.find(q => q.id === id) || {}).points || 0);
+    const pts = picked.reduce((s, id) => s + pointOf(id), 0);
+    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + Math.round(pts * 100) / 100 + ' 分';
+  }
+
   $('e-filter').addEventListener('input', renderPicker);
+  $('e-picked-list').addEventListener('input', e => { if (e.target.dataset.pts) e.target.dispatchEvent(new Event('change', { bubbles: true })); });
   $('e-picked-list').addEventListener('change', e => {
     const id = e.target.dataset.pts;
     if (!id) return;
     if (e.target.value === '') delete pickedPoints[id]; else pickedPoints[id] = +e.target.value;
-    renderPicker();
+    updatePickedTotal();  // 不重畫表格：按「儲存」時輸入框失焦觸發 change，重畫會把正在點的元素移除
   });
   $('e-picked-list').addEventListener('click', e => {
     const up = e.target.dataset.up, down = e.target.dataset.down;
