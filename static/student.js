@@ -19,6 +19,8 @@
   let viewing = null;          // 畫面中央的題目 id，用來累計每題停留時間
   let dwell = {};              // 尚未回報的停留秒數：question_id → 秒
   let dwellTicks = 0;
+  let away = false;            // 目前是否離開考試畫面（切視窗、切分頁、離開全螢幕），避免重複計次
+  let guardAction = null;      // 遮罩按鈕要做的事
   const TYPE_TEXT = { single: '單選題', multi: '多選題', fill: '填充題' };
   const PROMPT = { single: '請選擇一個答案：', multi: '可選擇多個答案：', fill: '請在空格中填入答案：' };
 
@@ -262,6 +264,7 @@
         '<tr><th>作答時間限制</th><td>' + ex.duration_min + ' 分鐘</td></tr>' +
         (ex.end_at ? '<tr><th>關閉時間</th><td>' + fmtDateTime(ex.end_at) + '</td></tr>' : '') + '</table>' +
         (short ? '<div class="alert warn">距離關閉只剩 ' + fmtSpan(left) + '，作答時間會在關閉時結束。</div>' : '') +
+        guardRules(ex) +
         '<p style="margin-top:.75rem">按下「開始作答」後立即開始計時，中途離開計時不會暫停。時間到系統會自動交卷。</p>',
         '開始作答', '取消');
       if (!ok) return;
@@ -271,18 +274,33 @@
 
   // ── 作答 ──
 
+  // 開始前告知這場考試的防切換規則
+  function guardRules(ex) {
+    const rules = [];
+    if (ex.fullscreen) rules.push('需要<b>全螢幕</b>作答，按 Esc 離開全螢幕會被記錄。');
+    if (ex.focus_mode === 'warn') rules.push('切換視窗、分頁或其他程式會被記錄並跳出警告。');
+    if (ex.focus_mode === 'lock') rules.push('離開考試畫面超過 <b>' + ex.focus_limit + '</b> 次，作答會被<b>鎖定</b>，需要老師解鎖。');
+    if (ex.focus_mode === 'submit') rules.push('離開考試畫面超過 <b>' + ex.focus_limit + '</b> 次，系統會<b>直接交卷</b>。');
+    if (ex.block_copy) rules.push('不能複製、貼上或按右鍵。');
+    return rules.length ? '<div class="alert warn" style="margin-top:.75rem"><b>本場考試規則</b><ul class="rules" style="color:inherit;margin-top:.25rem">' +
+      rules.map(r => '<li>' + r + '</li>').join('') + '</ul></div>' : '';
+  }
+
   async function startExam(examId) {
     try {
       const data = await call('POST', '/api/exams/' + examId + '/start', { device: store('exam_pc') || '' });
       current = data;
+      current.exam_id = examId;
       current.deadline = Date.now() + data.remaining_seconds * 1000;
       current.answers = Object.assign({}, data.saved);
       current.flags = new Set(JSON.parse(store('exam_flags_' + data.attempt_id) || '[]'));
       viewing = data.questions.length ? data.questions[0].id : null;
+      away = false;
       dwell = {};
       dwellTicks = 0;
       renderExam();
       show('take');
+      applyGuard();
       tick();
       clearInterval(timerId);
       timerId = setInterval(tick, 1000);
@@ -445,6 +463,12 @@
       if (err.status === 409) {
         setSave(err.message, 'ng');
         finishExam();
+      } else if (err.status === 423) {
+        // 被鎖定：答案留在佇列，老師解鎖後再送
+        setSave('作答已鎖定，答案會在解鎖後送出', 'ng');
+        current.guard.locked = true;
+        showLock();
+        setTimeout(flush, 5000);
       } else {
         setSave('尚未儲存，自動重試中…', 'ng');
         setTimeout(flush, 3000);
@@ -545,20 +569,157 @@
       try {
         const result = await call('POST', '/api/attempts/' + attemptId + '/submit');
         current = null;
+        leaveGuard();
         renderResult(result, timeUp);
         return;
       } catch (err) {
-        if (!err.network) { current = null; loadList(); return; }
+        if (!err.network) { current = null; leaveGuard(); loadList(); return; }
         setSave('網路不穩，交卷重試中…時間到伺服器也會用已存的答案自動交卷', 'ng');
         await new Promise(r => setTimeout(r, 3000));
       }
     }
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (!current || current.finishing) return;
-    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: document.hidden ? 'blur' : 'focus' }).catch(() => {});
+  // ── 離開考試畫面（防切換視窗）──
+  // 瀏覽器無法真的禁止切換程式，這裡做的是偵測與處置；次數與鎖定由伺服器判斷，改前端也繞不過。
+
+  const guarding = () => current && !current.finishing &&
+    (!$('view-take').classList.contains('hidden') || !$('view-summary').classList.contains('hidden'));
+  const fsSupported = () => !!(document.fullscreenEnabled && document.documentElement.requestFullscreen);
+  const needFullscreen = () => current.guard.fullscreen && fsSupported() && !document.fullscreenElement;
+
+  function applyGuard() {
+    const g = current.guard;
+    document.body.classList.toggle('no-copy', g.block_copy);
+    renderGuardCount();
+    if (g.locked) showLock();
+    else if (needFullscreen()) showFullscreenPrompt(false);
+    else hideGuard();
+  }
+
+  function renderGuardCount() {
+    const g = current.guard;
+    const el = document.querySelector('[data-guard-count]');
+    const limited = g.mode === 'lock' || g.mode === 'submit';
+    el.classList.toggle('hidden', g.mode === 'record');
+    el.classList.toggle('near', limited && g.switches >= g.limit);
+    el.textContent = limited ? '離開考試畫面 ' + g.switches + ' / ' + g.limit + ' 次' : '離開考試畫面 ' + g.total + ' 次（已記錄）';
+  }
+
+  function showGuard(kind, title, body, button, action) {
+    $('guard').querySelector('.guard-box').className = 'guard-box ' + kind;
+    $('guard-title').textContent = title;
+    $('guard-body').innerHTML = body;
+    $('guard-ok').textContent = button;
+    guardAction = action;
+    $('guard').classList.remove('hidden');
+  }
+  function hideGuard() { $('guard').classList.add('hidden'); guardAction = null; }
+
+  async function enterFullscreen() {
+    try { await document.documentElement.requestFullscreen(); } catch (e) { /* 使用者拒絕時維持提示 */ }
+    if (!document.fullscreenElement) return;
+    if (away) {  // 離開全螢幕後，重新進入才算回來
+      away = false;
+      call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'focus' }).catch(() => {});
+    }
+    if (current.guard.locked) showLock(); else hideGuard();
+  }
+
+  function showFullscreenPrompt(again) {
+    showGuard('warn', again ? '請回到全螢幕' : '這場考試需要全螢幕作答',
+      '<p>' + (again ? '離開全螢幕已記錄一次。' : '') + '按下按鈕進入全螢幕後才能看到題目。</p>' +
+      '<p class="muted">作答中按 Esc 或切換視窗都會被記錄。</p>', '進入全螢幕', enterFullscreen);
+  }
+
+  function showLock() {
+    showGuard('lock', '作答已鎖定', '<p>離開考試畫面超過 <b>' + current.guard.limit + '</b> 次，系統已鎖定作答。</p>' +
+      '<p><b>請舉手找老師解鎖。</b>已作答的內容都有保存，但計時不會暫停。</p>', '老師已解鎖，繼續作答', checkUnlock);
+  }
+
+  async function checkUnlock() {
+    try {
+      const data = await call('POST', '/api/exams/' + current.exam_id + '/start', { device: store('exam_pc') || '' });
+      current.guard = data.guard;
+      if (data.guard.locked) {
+        $('guard-body').insertAdjacentHTML('beforeend', '<p class="msg ng">老師還沒有解鎖。</p>');
+        return;
+      }
+      applyGuard();
+    } catch (err) {
+      if (err.status === 409) { hideGuard(); current.finishing = true; loadList(); }
+    }
+  }
+
+  $('guard-ok').addEventListener('click', () => guardAction && guardAction());
+
+  function goAway(reason) {
+    if (away || !guarding()) return;
+    away = true;
+    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'blur', reason }).then(r => {
+      if (!current) return;
+      if (r.submitted) { onViolationSubmit(); return; }
+      Object.assign(current.guard, { switches: r.switches, total: r.total, locked: r.locked });
+      renderGuardCount();
+      if (!away) afterReturn(reason);   // 回應比「回到畫面」晚到
+      else if (r.locked) showLock();
+    }).catch(() => {});
+  }
+
+  function comeBack() {
+    if (!away || !current) return;
+    if (needFullscreen()) return;  // 要求全螢幕時，重新進入全螢幕才算回來
+    away = false;
+    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'focus' }).catch(() => {});
+    afterReturn();
+  }
+
+  function afterReturn(reason) {
+    const g = current.guard;
+    if (g.locked) return showLock();
+    if (g.fullscreen && fsSupported() && !document.fullscreenElement) return showFullscreenPrompt(true);
+    if (g.mode === 'record') return;
+    const left = g.limit - g.switches;
+    let body = '<div class="big-count">第 ' + (g.mode === 'warn' ? g.total : g.switches) + ' 次</div><p>你離開了考試畫面（切換視窗、分頁或其他程式），系統已記錄，老師會看到。</p>';
+    if (g.mode === 'lock' || g.mode === 'submit') {
+      body += left > 0 ? '<p>再離開 <b>' + left + '</b> 次以上，' + (g.mode === 'lock' ? '作答會被鎖定，需要老師解鎖。' : '系統會<b>直接交卷</b>。') + '</p>'
+        : '<p><b>再離開一次，' + (g.mode === 'lock' ? '作答就會被鎖定。' : '系統就會直接交卷。') + '</b></p>';
+    }
+    showGuard('warn', '請專心作答', body, '我知道了，回到考試', hideGuard);
+  }
+
+  // 交卷後解除限制
+  function leaveGuard() {
+    hideGuard();
+    document.body.classList.remove('no-copy');
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  }
+
+  async function onViolationSubmit() {
+    const attemptId = current.attempt_id;
+    current.finishing = true;
+    clearInterval(timerId);
+    current = null;
+    leaveGuard();
+    await ask('已自動交卷', '<p>離開考試畫面超過允許次數，系統已用目前儲存的答案交卷。</p>', '查看結果', null);
+    loadResult(attemptId);
+  }
+
+  // 切分頁、縮小視窗 → visibilitychange；切到其他程式 → window blur。兩者常一起發生，只算一次
+  document.addEventListener('visibilitychange', () => { if (document.hidden) goAway('window'); else if (document.hasFocus()) comeBack(); });
+  window.addEventListener('blur', () => goAway('window'));
+  window.addEventListener('focus', () => { if (!document.hidden) comeBack(); });
+  document.addEventListener('fullscreenchange', () => {
+    if (!current || current.finishing || !current.guard.fullscreen) return;
+    if (!document.fullscreenElement && guarding()) {
+      goAway('fullscreen');  // 之後跟著來的 window blur 因為 away 已成立，不會重複計次
+      if (!current.guard.locked) showFullscreenPrompt(true);
+    }
   });
+  // 禁止複製、貼上、右鍵（考試有開啟時）
+  ['copy', 'cut', 'paste', 'contextmenu'].forEach(type => document.addEventListener(type, e => {
+    if (current && current.guard && current.guard.block_copy && guarding()) e.preventDefault();
+  }));
   // 關分頁、切 App 時把還沒送出的作答用 keepalive 送出，瀏覽器關掉也會送完
   window.addEventListener('pagehide', () => {
     if (current) sendDwell(true);

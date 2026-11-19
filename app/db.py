@@ -41,7 +41,12 @@ CREATE TABLE IF NOT EXISTS exams (
     review_when  TEXT NOT NULL DEFAULT 'immediate',  -- immediate 交卷後立即、after_close 結束後、at_time 指定時間
     review_at    TEXT NOT NULL DEFAULT '',           -- review_when = at_time 時的公布時間
     allow_review INTEGER NOT NULL DEFAULT 1,         -- 0 = 只在交卷當下看一次詳解，之後只看總分
-    review_until TEXT NOT NULL DEFAULT ''            -- 可回頭複習的截止時間，空 = 不限
+    review_until TEXT NOT NULL DEFAULT '',           -- 可回頭複習的截止時間，空 = 不限
+    focus_mode   TEXT NOT NULL DEFAULT 'record',     -- 離開考試畫面：record 只記錄、warn 警告、lock 超過次數鎖定、submit 超過次數交卷
+    focus_limit  INTEGER NOT NULL DEFAULT 3,         -- lock / submit 允許離開的次數
+    fullscreen   INTEGER NOT NULL DEFAULT 0,         -- 1 = 要求全螢幕作答，離開全螢幕算一次離開
+    block_copy   INTEGER NOT NULL DEFAULT 0,         -- 1 = 禁止複製、貼上、右鍵
+    seat_map     TEXT NOT NULL DEFAULT ''            -- 座位表：每行一排，逗號或 Tab 分隔電腦代碼／學號，空格 = 走道
 );
 
 CREATE TABLE IF NOT EXISTS exam_questions (
@@ -63,6 +68,7 @@ CREATE TABLE IF NOT EXISTS attempts (
     ip           TEXT NOT NULL DEFAULT '',
     device       TEXT NOT NULL DEFAULT '',
     tab_switches INTEGER NOT NULL DEFAULT 0,
+    locked       INTEGER NOT NULL DEFAULT 0,      -- 1 = 離開畫面超過次數，等老師解鎖
     UNIQUE (exam_id, student_id)
 );
 
@@ -114,6 +120,12 @@ MIGRATIONS = [
     ("exams", "allow_review", "INTEGER NOT NULL DEFAULT 1"),
     ("exams", "review_until", "TEXT NOT NULL DEFAULT ''"),
     ("students", "password_hash", "TEXT NOT NULL DEFAULT ''"),
+    ("exams", "focus_mode", "TEXT NOT NULL DEFAULT 'record'"),
+    ("exams", "focus_limit", "INTEGER NOT NULL DEFAULT 3"),
+    ("exams", "fullscreen", "INTEGER NOT NULL DEFAULT 0"),
+    ("exams", "block_copy", "INTEGER NOT NULL DEFAULT 0"),
+    ("exams", "seat_map", "TEXT NOT NULL DEFAULT ''"),
+    ("attempts", "locked", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 

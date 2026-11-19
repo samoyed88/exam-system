@@ -103,6 +103,22 @@
       </fieldset>
 
       <fieldset>
+        <legend>防止切換視窗</legend>
+        <div class="field-row"><label for="e-focus">離開考試畫面時</label>
+          <div><select id="e-focus">
+            <option value="record">只記錄次數（學生不會看到提示）</option>
+            <option value="warn">記錄並跳出警告</option>
+            <option value="lock">超過次數就鎖定作答，老師解鎖後才能繼續</option>
+            <option value="submit">超過次數就直接交卷</option>
+          </select>
+          <div class="inline hidden" id="e-focus-limit-wrap" style="margin-top:.5rem"><span>允許離開</span><input type="number" id="e-focus-limit" min="1" max="99" value="3"><span>次，第 <b id="e-focus-limit-next">4</b> 次觸發</span></div>
+          <div class="hint">切換到其他視窗、分頁、程式，或縮小瀏覽器都算一次。瀏覽器無法真的禁止切換，只能偵測後處置；鎖定期間計時不會暫停。</div></div></div>
+        <div class="field-row"><label>其他限制</label>
+          <div><label class="check"><input type="checkbox" id="e-fullscreen"> 要求全螢幕作答（離開全螢幕算一次離開；iPhone 不支援時略過）</label><br>
+          <label class="check"><input type="checkbox" id="e-block-copy"> 禁止複製、貼上、右鍵</label></div></div>
+      </fieldset>
+
+      <fieldset>
         <legend>題目</legend>
         <input type="text" id="e-filter" placeholder="依題幹或標籤篩選" style="margin-top:.5rem">
         <div class="qpick" id="e-questions" style="margin-top:.5rem"></div>

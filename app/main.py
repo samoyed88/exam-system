@@ -285,6 +285,7 @@ class AnswerIn(BaseModel):
 
 class EventIn(BaseModel):
     type: str                           # blur / focus / time
+    reason: str = ""                    # blur：window 切換視窗、fullscreen 離開全螢幕
     seconds: dict[int, float] = {}      # time：題目 id → 這段期間停留的秒數
 
 
@@ -372,6 +373,8 @@ def student_exams(sid: str = Depends(current_student), db=Depends(get_db)):
             "allow_review": bool(exam["allow_review"]) and exam["show_mode"] != "score",
             "review_until": parse_time(exam["review_until"]).isoformat()
             if exam["review_until"] else "",
+            "focus_mode": exam["focus_mode"], "focus_limit": exam["focus_limit"],
+            "fullscreen": bool(exam["fullscreen"]), "block_copy": bool(exam["block_copy"]),
             "attempt": None if not attempt else {
                 "id": attempt["id"], "submitted": bool(attempt["submitted_at"])},
         })
@@ -415,7 +418,23 @@ def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
         "SELECT question_id, response FROM answers WHERE attempt_id = ?", (attempt["id"],))}
     remaining = (datetime.fromisoformat(attempt["deadline"]) - now()).total_seconds()
     return {"attempt_id": attempt["id"], "title": exam["title"],
-            "remaining_seconds": max(0, int(remaining)), "questions": out, "saved": saved}
+            "remaining_seconds": max(0, int(remaining)), "questions": out, "saved": saved,
+            "guard": guard_info(db, exam, attempt)}
+
+
+def switches_since_unlock(db, attempt_id: int) -> int:
+    """老師解鎖後重新給一輪允許次數；tab_switches 仍保留總次數給老師看。"""
+    return db.execute(
+        "SELECT COUNT(*) FROM attempt_log WHERE attempt_id = ? AND kind = 'blur' AND id > "
+        "COALESCE((SELECT MAX(id) FROM attempt_log WHERE attempt_id = ? AND kind = 'unlock'), 0)",
+        (attempt_id, attempt_id)).fetchone()[0]
+
+
+def guard_info(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
+    return {"mode": exam["focus_mode"], "limit": exam["focus_limit"],
+            "fullscreen": bool(exam["fullscreen"]), "block_copy": bool(exam["block_copy"]),
+            "switches": switches_since_unlock(db, attempt["id"]), "total": attempt["tab_switches"],
+            "locked": bool(attempt["locked"])}
 
 
 @app.post("/api/exams/{exam_id}/start")
@@ -502,6 +521,8 @@ def save_answer(attempt_id: int, body: AnswerIn, request: Request,
     attempt = own_attempt(db, attempt_id, sid)
     if attempt["submitted_at"]:
         raise HTTPException(409, "已經交卷，無法再修改")
+    if attempt["locked"]:
+        raise HTTPException(423, "離開考試畫面次數過多，作答已鎖定，請舉手找老師解鎖")
     require_exam_ip(db, attempt, request)
     if now() > datetime.fromisoformat(attempt["deadline"]) + timedelta(seconds=GRACE_SECONDS):
         finalize(db, attempt_id, "auto_submit")
@@ -551,11 +572,9 @@ def attempt_event(attempt_id: int, body: EventIn,
                   sid: str = Depends(current_student), db=Depends(get_db)):
     attempt = own_attempt(db, attempt_id, sid)
     if attempt["submitted_at"]:
-        return {"ok": True}
+        return {"ok": True, "submitted": True}
     if body.type == "blur":
-        db.execute("UPDATE attempts SET tab_switches = tab_switches + 1 WHERE id = ?",
-                   (attempt_id,))
-        log_event(db, attempt_id, "blur")
+        return record_blur(db, attempt, body.reason)
     elif body.type == "focus":
         log_event(db, attempt_id, "focus")
     elif body.type == "time":
@@ -568,6 +587,28 @@ def attempt_event(attempt_id: int, body: EventIn,
                            "ON CONFLICT (attempt_id, question_id) DO UPDATE SET "
                            "seconds = seconds + excluded.seconds", (attempt_id, qid, sec))
     return {"ok": True}
+
+
+def record_blur(db, attempt: sqlite3.Row, reason: str) -> dict:
+    """離開考試畫面：累加次數，依考試設定警告、鎖定或交卷。判斷在伺服器，改前端也繞不過次數。"""
+    exam = exam_or_404(db, attempt["exam_id"])
+    aid = attempt["id"]
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("UPDATE attempts SET tab_switches = tab_switches + 1 WHERE id = ?", (aid,))
+        log_event(db, aid, "blur", detail="離開全螢幕" if reason == "fullscreen" else "")
+        over = switches_since_unlock(db, aid) > exam["focus_limit"]
+        if over and exam["focus_mode"] == "lock" and not attempt["locked"]:
+            db.execute("UPDATE attempts SET locked = 1 WHERE id = ?", (aid,))
+            log_event(db, aid, "lock")
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    if over and exam["focus_mode"] == "submit":
+        finalize(db, aid, "violation_submit")
+    attempt = db.execute("SELECT * FROM attempts WHERE id = ?", (aid,)).fetchone()
+    return {"ok": True, "submitted": bool(attempt["submitted_at"]), **guard_info(db, exam, attempt)}
 
 
 def result_payload(db, attempt: sqlite3.Row, just_submitted: bool = False) -> dict:
@@ -691,6 +732,10 @@ class ExamIn(BaseModel):
     review_until: str = ""
     allowed_ips: str = ""
     published: bool = False
+    focus_mode: str = "record"
+    focus_limit: int = 3
+    fullscreen: bool = False
+    block_copy: bool = False
     question_ids: list[int] = []
 
 
@@ -921,10 +966,18 @@ def exam_values(e: ExamIn) -> tuple:
         raise HTTPException(400, "選「考試關閉後公布成績」時，要設定關閉時間")
     if e.review_when == "at_time" and not review_at:
         raise HTTPException(400, "選「指定時間公布成績」時，要設定公布時間")
+    if e.focus_mode not in FOCUS_MODES:
+        raise HTTPException(400, "離開考試畫面的處理方式不正確")
+    if not 1 <= e.focus_limit <= 99:
+        raise HTTPException(400, "允許離開次數要在 1 到 99 之間")
     return (e.title.strip(), e.start_at, e.end_at, e.duration_min, e.class_names,
             int(e.shuffle_q), int(e.shuffle_opt), e.show_mode, e.allowed_ips, int(e.published),
             e.review_when, e.review_at if e.review_when == "at_time" else "",
-            int(e.allow_review), e.review_until if e.allow_review else "")
+            int(e.allow_review), e.review_until if e.allow_review else "",
+            e.focus_mode, e.focus_limit, int(e.fullscreen), int(e.block_copy))
+
+
+FOCUS_MODES = ("record", "warn", "lock", "submit")
 
 
 def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
@@ -940,7 +993,8 @@ def set_exam_questions(db, exam_id: int, ids: list[int]) -> None:
 
 
 EXAM_COLS = ("title, start_at, end_at, duration_min, class_names, shuffle_q, shuffle_opt, "
-             "show_mode, allowed_ips, published, review_when, review_at, allow_review, review_until")
+             "show_mode, allowed_ips, published, review_when, review_at, allow_review, review_until, "
+             "focus_mode, focus_limit, fullscreen, block_copy")
 
 
 @app.get("/api/admin/exams", dependencies=[admin])
@@ -964,8 +1018,8 @@ def create_exam(body: ExamIn, db=Depends(get_db)):
     values = exam_values(body)
     db.execute("BEGIN")
     try:
-        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                         values)
+        marks = ", ".join("?" * len(values))
+        cur = db.execute(f"INSERT INTO exams ({EXAM_COLS}) VALUES ({marks})", values)
         set_exam_questions(db, cur.lastrowid, body.question_ids)
         db.execute("COMMIT")
     except Exception:
@@ -1040,6 +1094,7 @@ def monitor(exam_id: int, db=Depends(get_db)):
                 "attempt_id": a["id"], "answered": a["answered"], "score": a["score"],
                 "max_score": a["max_score"], "ip": a["ip"], "device": a["device"],
                 "tab_switches": a["tab_switches"], "started_at": a["started_at"],
+                "locked": bool(a["locked"]) and not a["submitted_at"],
                 "submitted_at": a["submitted_at"],
                 "status": "submitted" if a["submitted_at"] else "in_progress"})
             row["seconds"] = used_seconds(row)
@@ -1267,6 +1322,15 @@ def accept_fill(qid: int, body: AcceptFillIn, db=Depends(get_db)):
                (json.dumps(answer, ensure_ascii=False), qid))
     regrade_question(db, qid)
     return {"ok": True, "answer": answer}
+
+
+@app.post("/api/admin/attempts/{attempt_id}/unlock", dependencies=[admin])
+def unlock_attempt(attempt_id: int, db=Depends(get_db)):
+    if not db.execute("SELECT 1 FROM attempts WHERE id = ?", (attempt_id,)).fetchone():
+        raise HTTPException(404, "找不到這份作答")
+    db.execute("UPDATE attempts SET locked = 0 WHERE id = ?", (attempt_id,))
+    log_event(db, attempt_id, "unlock")
+    return {"ok": True}
 
 
 @app.post("/api/admin/attempts/{attempt_id}/force-submit", dependencies=[admin])

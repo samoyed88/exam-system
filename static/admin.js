@@ -119,6 +119,7 @@
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
       review_when: 'immediate', review_at: '', allow_review: 1, review_until: '', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
+      focus_mode: 'record', focus_limit: 3, fullscreen: 0, block_copy: 0,
     };
     $('exam-form-title').textContent = id ? '編輯考試' : '新增考試';
     $('e-title').value = e.title;
@@ -138,6 +139,11 @@
     $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
     $('e-published').checked = !!e.published;
     $('e-ips').value = e.allowed_ips;
+    $('e-focus').value = e.focus_mode;
+    $('e-focus-limit').value = e.focus_limit;
+    $('e-fullscreen').checked = !!e.fullscreen;
+    $('e-block-copy').checked = !!e.block_copy;
+    syncFocus();
     $('e-filter').value = '';
     picked = e.question_ids.slice();
     renderPicker();
@@ -154,6 +160,12 @@
     $('e-review-at-wrap').classList.toggle('hidden', $('e-review').value !== 'at_time');
     $('e-review-until-wrap').classList.toggle('hidden', $('e-allow-review').value !== 'until');
   }
+  function syncFocus() {
+    $('e-focus-limit-wrap').classList.toggle('hidden', !['lock', 'submit'].includes($('e-focus').value));
+    $('e-focus-limit-next').textContent = (+$('e-focus-limit').value || 0) + 1;
+  }
+  $('e-focus').addEventListener('change', syncFocus);
+  $('e-focus-limit').addEventListener('input', syncFocus);
   $('e-review').addEventListener('change', syncReview);
   $('e-allow-review').addEventListener('change', syncReview);
   $('e-start-on').addEventListener('change', syncTimeInputs);
@@ -203,6 +215,8 @@
       review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
       shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
+      focus_mode: $('e-focus').value, focus_limit: +$('e-focus-limit').value || 3,
+      fullscreen: $('e-fullscreen').checked, block_copy: $('e-block-copy').checked,
     };
     try {
       if (editingExam) await call('PUT', '/api/admin/exams/' + editingExam, body);
@@ -249,17 +263,20 @@
       '<div><b>' + count('absent') + '</b><span>未進場</span></div>' +
       '<div><b style="color:var(--warn)">' + count('in_progress') + '</b><span>作答中</span></div>' +
       '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
+      (data.rows.some(r => r.locked) ? '<div><b style="color:var(--ng)">' + data.rows.filter(r => r.locked).length + '</b><span>已鎖定，等你解鎖</span></div>' : '') +
       '<div><b>' + avg + '</b><span>平均分</span></div>';
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
+    const locked = '<span class="badge ng">已鎖定</span>';
     $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>用時</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
       data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
         '<td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
-        '<td>' + status[r.status] + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
+        '<td>' + (r.locked ? locked : status[r.status]) + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
         '<td>' + (r.attempt_id ? fmtSec(r.seconds) : '') + '</td>' +
         '<td>' + (r.score != null ? r.score + ' / ' + r.max_score : '') + '</td>' +
         '<td>' + esc(r.ip || '') + '</td><td>' + esc(r.device || '') + '</td><td>' + (r.tab_switches || '') + '</td>' +
         '<td>' + r.flags.map(esc).join('<br>') + '</td>' +
-        '<td class="row">' + (r.status === 'in_progress' ? '<button class="btn ghost sm" data-force="' + r.attempt_id + '">強制交卷</button>' : '') +
+        '<td class="row">' + (r.locked ? '<button class="btn sm" data-unlock="' + r.attempt_id + '">解鎖</button>' : '') +
+        (r.status === 'in_progress' ? '<button class="btn ghost sm" data-force="' + r.attempt_id + '">強制交卷</button>' : '') +
         (r.attempt_id ? '<button class="btn danger sm" data-reset="' + r.attempt_id + '" data-name="' + esc(r.name) + '">重考</button>' : '') +
         '</td></tr>').join('');
   }
@@ -272,6 +289,10 @@
   $('mon-table').addEventListener('click', async e => {
     const t = e.target;
     if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'monitor'); return; }
+    if (t.dataset.unlock) {
+      await call('POST', '/api/admin/attempts/' + t.dataset.unlock + '/unlock');
+      refreshMonitor();
+    }
     if (t.dataset.force && confirm('確定要替這位學生交卷？')) {
       await call('POST', '/api/admin/attempts/' + t.dataset.force + '/force-submit');
       refreshMonitor();
@@ -537,7 +558,8 @@
   const EVENT_TEXT = {
     start: ['開始作答', 'sys'], resume: ['重新進入考試頁', 'sys'], blur: ['離開考試畫面（切換視窗或分頁）', 'away'],
     focus: ['回到考試畫面', 'answer'], submit: ['交卷', 'sys'], auto_submit: ['時間到，系統自動交卷', 'sys'],
-    force_submit: ['老師代為交卷', 'sys'],
+    force_submit: ['老師代為交卷', 'sys'], violation_submit: ['離開畫面超過次數，系統自動交卷', 'away'],
+    lock: ['離開畫面超過次數，作答鎖定', 'away'], unlock: ['老師解鎖', 'sys'],
   };
   const clockText = iso => {
     const d = new Date(iso);

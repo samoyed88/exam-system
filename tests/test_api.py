@@ -633,3 +633,65 @@ def test_pages_use_versioned_assets(client):
     ref = re.search(r'href="(/style\.css\?v=\w+)"', client.get("/admin").text)[1]
     assert "immutable" in client.get(ref).headers["cache-control"]
     assert client.get("/style.css").headers["cache-control"] == "no-cache"
+
+
+# ── 防止切換視窗 ──
+
+def test_focus_lock_and_unlock(client):
+    h, exam_id = setup_exam(client, focus_mode="lock", focus_limit=2, fullscreen=True, block_copy=True)
+    s = student_headers(client, "11201")
+    ex = client.get("/api/exams", headers=s).json()["exams"][0]
+    assert ex["focus_mode"] == "lock" and ex["focus_limit"] == 2 and ex["fullscreen"] and ex["block_copy"]
+    started = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()
+    aid, q = started["attempt_id"], started["questions"][0]
+    assert started["guard"] == {"mode": "lock", "limit": 2, "fullscreen": True, "block_copy": True,
+                                "switches": 0, "total": 0, "locked": False}
+    blur = lambda: client.post(f"/api/attempts/{aid}/event", json={"type": "blur", "reason": "window"}, headers=s).json()
+    assert blur()["locked"] is False
+    assert blur()["locked"] is False          # 第 2 次還在允許範圍
+    r = blur()                                # 第 3 次鎖定
+    assert r["locked"] is True and r["switches"] == 3
+    save = client.put(f"/api/attempts/{aid}/answers", json={"question_id": q["id"], "response": None}, headers=s)
+    assert save.status_code == 423
+    mon = client.get(f"/api/admin/exams/{exam_id}/monitor", headers=h).json()
+    assert [r for r in mon["rows"] if r["student_id"] == "11201"][0]["locked"] is True
+    # 重新進入仍是鎖定
+    assert client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["guard"]["locked"] is True
+    client.post(f"/api/admin/attempts/{aid}/unlock", headers=h)
+    assert client.put(f"/api/attempts/{aid}/answers", json={"question_id": q["id"], "response": None},
+                      headers=s).status_code == 200
+    kinds = [e["kind"] for e in client.get(f"/api/admin/attempts/{aid}/log", headers=h).json()["timeline"]]
+    assert kinds.count("blur") == 3 and "lock" in kinds and "unlock" in kinds
+    # 解鎖後重新給一輪允許次數，總次數保留
+    r = blur()
+    assert r["locked"] is False and r["switches"] == 1 and r["total"] == 4
+    blur()
+    assert blur()["locked"] is True
+
+
+def test_focus_submit_mode(client):
+    h, exam_id = setup_exam(client, focus_mode="submit", focus_limit=1)
+    s = student_headers(client, "11201")
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    blur = lambda: client.post(f"/api/attempts/{aid}/event", json={"type": "blur"}, headers=s).json()
+    assert blur()["submitted"] is False
+    assert blur()["submitted"] is True
+    log = client.get(f"/api/admin/attempts/{aid}/log", headers=h).json()
+    assert log["timeline"][-1]["kind"] == "violation_submit" and log["attempt"]["submitted_at"]
+
+
+def test_focus_record_mode_never_locks(client):
+    h, exam_id = setup_exam(client)
+    s = student_headers(client, "11201")
+    aid = client.post(f"/api/exams/{exam_id}/start", json={}, headers=s).json()["attempt_id"]
+    for _ in range(10):
+        r = client.post(f"/api/attempts/{aid}/event", json={"type": "blur"}, headers=s).json()
+    assert r["switches"] == 10 and not r["locked"] and not r["submitted"]
+
+
+def test_focus_settings_validated(client):
+    h, _ = setup_exam(client)
+    bad = {"title": "x", "question_ids": [1], "focus_mode": "explode"}
+    assert client.post("/api/admin/exams", json=bad, headers=h).status_code == 400
+    bad = {"title": "x", "question_ids": [1], "focus_mode": "lock", "focus_limit": 0}
+    assert client.post("/api/admin/exams", json=bad, headers=h).status_code == 400

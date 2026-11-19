@@ -270,6 +270,19 @@ tr.flagged td { background: #fbefe9; }
 .save-state.ok::before { content: '✓ '; color: var(--ok); }
 .mobile-bar, .mobile-nav { display: none; }
 
+/* 離開考試畫面：警告、鎖定、全螢幕提示 */
+.guard { position: fixed; inset: 0; z-index: 400; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 1rem; }
+.guard-box { max-width: 480px; width: 100%; text-align: center; background: var(--surface); border: 1px solid var(--border); border-top: 4px solid var(--rule); border-radius: var(--radius); padding: 1.75rem 1.5rem; }
+.guard-box h2 { margin: 0 0 .75rem; font-size: 1.35rem; }
+.guard-box.warn { border-top-color: var(--warn); }
+.guard-box.lock { border-top-color: var(--ng); }
+.guard-box.lock h2 { color: var(--ng); }
+.guard-box .big-count { font-family: var(--mono); font-size: 2.2rem; font-weight: 700; line-height: 1.2; margin: .4rem 0; }
+.guard-count { font-size: .8rem; color: var(--text-muted); text-align: center; margin: -.25rem 0 .6rem; }
+.guard-count.near { color: var(--ng); font-weight: 700; }
+.no-copy { -webkit-user-select: none; user-select: none; }
+.no-copy input[type=text] { -webkit-user-select: text; user-select: text; }
+
 /* ── 作答摘要／成績：分數像紅筆寫在卷首 ── */
 .summary-table td.state-done { color: var(--ok); }
 .summary-table td.state-empty { color: var(--ng); font-weight: 600; }
