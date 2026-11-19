@@ -33,12 +33,12 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'questions', 'students'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
     if (view !== 'monitor') clearInterval(monitorTimer);
-    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams' }[view] || view;
+    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   }
 
@@ -646,6 +646,139 @@
       hit.addEventListener('mouseleave', e => tip(e, null));
     });
     el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（這位學生看到的順序）';
+  }
+
+  // ── 座位分析 ──
+
+  let seats = null;
+  const LEVEL_BADGE = ['<span class="badge gray">正常</span>', '<span class="badge warn">需要留意</span>', '<span class="badge ng">高度可疑</span>'];
+
+  $('mon-seats').addEventListener('click', () => loadSeats());
+  $('seats-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+
+  async function loadSeats() {
+    show('seats');
+    $('seats-title').textContent = $('mon-title').textContent + '：座位分析';
+    $('seat-msg').textContent = '';
+    $('seat-compare-card').classList.add('hidden');
+    renderSeats(await call('GET', '/api/admin/exams/' + monitorExam + '/seats'));
+  }
+
+  $('seat-save').addEventListener('click', async () => {
+    try {
+      renderSeats(await call('PUT', '/api/admin/exams/' + monitorExam + '/seats', { seat_map: $('seat-map').value }));
+      $('seat-compare-card').classList.add('hidden');
+      say('seat-msg', '已儲存並重新分析', true);
+    } catch (err) { say('seat-msg', err.message); }
+  });
+  $('seat-prev').addEventListener('click', () => { $('seat-map').value = seats.previous.seat_map; $('seat-save').click(); });
+
+  function renderSeats(d) {
+    seats = d;
+    $('seat-map').value = d.seat_map;
+    $('seat-devices').innerHTML = d.devices.length
+      ? '這場考試記錄到的電腦代碼：<span style="font-family:var(--mono)">' + d.devices.map(esc).join('、') + '</span>' : '這場考試沒有學生設定電腦代碼，座位表請填學號。';
+    $('seat-prev').classList.toggle('hidden', !d.previous || !!d.seat_map);
+    if (d.previous) $('seat-prev').textContent = '套用「' + d.previous.title + '」的座位表';
+    $('seat-result').classList.toggle('hidden', !d.grid.length);
+    if (!d.grid.length) return;
+    renderSeatGrid(d);
+    const flagged = d.pairs.filter(p => p.level).length;
+    $('seat-count').textContent = d.pairs.length + ' 組相鄰' + (flagged ? '，其中 ' + flagged + ' 組需要注意' : '，沒有發現異常');
+    $('seat-pairs').innerHTML = pairHead(true) + (d.pairs.map(p => pairRow(p, true)).join('') ||
+      '<tr><td colspan="7" class="muted">座位表上沒有兩位相鄰、都已交卷的學生。</td></tr>');
+    $('seat-others-card').classList.toggle('hidden', !d.others.length);
+    $('seat-others').innerHTML = pairHead(false) + d.others.map(p => pairRow(p, false)).join('');
+    const notes = [];
+    if (d.unmatched.length) notes.push('座位表上對應不到交卷學生的格子：' + d.unmatched.map(esc).join('、') + '（缺考、代碼打錯，或同一台電腦被另一位學生使用）');
+    if (d.unseated.length) notes.push('已交卷但不在座位表上：' + d.unseated.map(s => esc(s.name) + '（' + esc(s.student_id) + (s.device ? '，' + esc(s.device) : '') + '）').join('、'));
+    $('seat-notes').innerHTML = notes.join('<br>');
+  }
+
+  function renderSeatGrid(d) {
+    const R = d.grid.length, C = d.grid[0].length;
+    const conn = {};
+    d.pairs.forEach((p, i) => { if (p.level) conn[p.cells[0].join(',') + '|' + p.cells[1].join(',')] = { level: p.level, i }; });
+    const cols = [];
+    for (let c = 0; c < C; c++) { cols.push('auto'); if (c < C - 1) cols.push('14px'); }
+    const html = [];
+    for (let r = 0; r < R; r++) {
+      for (let c = 0; c < C; c++) {
+        html.push(seatCell(d.grid[r][c], r, c));
+        if (c < C - 1) html.push(connector('h', conn[r + ',' + c + '|' + r + ',' + (c + 1)]));
+      }
+      if (r < R - 1) for (let c = 0; c < C; c++) {
+        html.push(connector('v', conn[r + ',' + c + '|' + (r + 1) + ',' + c]));
+        if (c < C - 1) html.push('<div></div>');
+      }
+    }
+    $('seat-grid').style.gridTemplateColumns = cols.join(' ');
+    $('seat-grid').innerHTML = html.join('');
+  }
+
+  function seatCell(cell, r, c) {
+    if (!cell) return '<div class="seat aisle"></div>';
+    const pos = 'data-cell="' + r + ',' + c + '"';
+    if (!cell.student_id) return '<div class="seat unmatched" ' + pos + '><div class="pc">' + esc(cell.label) + '</div><div>—</div></div>';
+    return '<div class="seat' + (cell.level ? ' lv' + cell.level : '') + '" ' + pos + ' title="' + esc(cell.name + '（' + cell.student_id + '）') + '">' +
+      '<div class="pc">' + esc(cell.label) + '</div><div class="nm">' + esc(cell.name) + '</div>' +
+      '<div class="sc">' + fmtNum(cell.score) + ' / ' + fmtNum(cell.max_score) + '</div></div>';
+  }
+
+  function connector(dir, c) {
+    return '<div class="conn ' + dir + (c ? ' lv' + c.level + '" data-pair="' + c.i + '" title="點一下看逐題比對' : '') + '"></div>';
+  }
+
+  function pairHead(adjacent) {
+    return '<tr><th>判讀</th>' + (adjacent ? '<th>座位</th>' : '') + '<th>學生</th><th>錯成同一個答案</th><th>30 秒內作答相同</th><th>說明</th><th></th></tr>';
+  }
+
+  function pairRow(p, adjacent) {
+    const who = s => esc(s.name) + ' <span class="muted">' + esc(s.student_id) + (s.device ? '・' + esc(s.device) : '') + '</span>';
+    const idx = adjacent ? seats.pairs.indexOf(p) : -1;
+    return '<tr class="pair-row"' + (adjacent ? ' data-row="' + idx + '"' : '') + '>' +
+      '<td>' + LEVEL_BADGE[p.level] + '</td>' + (adjacent ? '<td>' + p.relation_text + '</td>' : '') +
+      '<td>' + who(p.a) + '<br>' + who(p.b) + '</td>' +
+      '<td><b>' + p.eeic + '</b> <span class="muted">/ 兩人都錯 ' + p.both_wrong + ' 題（碰巧約 ' + p.expected + '）</span></td>' +
+      '<td><b>' + p.sync + '</b> <span class="muted">題</span></td>' +
+      '<td style="white-space:normal;min-width:16rem">' + (p.reasons.map(esc).join('<br>') || '<span class="muted">在正常範圍內</span>') + '</td>' +
+      '<td><button class="btn ghost sm" data-compare="' + esc(p.a.student_id) + '|' + esc(p.b.student_id) + '">逐題比對</button></td></tr>';
+  }
+
+  function highlight(cells) {
+    document.querySelectorAll('.seat.hl').forEach(el => el.classList.remove('hl'));
+    (cells || []).forEach(c => { const el = document.querySelector('[data-cell="' + c.join(',') + '"]'); if (el) el.classList.add('hl'); });
+  }
+
+  $('seat-pairs').addEventListener('mouseover', e => {
+    const row = e.target.closest('[data-row]');
+    highlight(row ? seats.pairs[+row.dataset.row].cells : null);
+  });
+  $('seat-pairs').addEventListener('mouseleave', () => highlight(null));
+  $('seat-grid').addEventListener('click', e => {
+    const c = e.target.closest('[data-pair]');
+    if (c) { const p = seats.pairs[+c.dataset.pair]; compare(p.a.student_id, p.b.student_id, p.cells); }
+  });
+  ['seat-pairs', 'seat-others'].forEach(id => $(id).addEventListener('click', e => {
+    const b = e.target.closest('[data-compare]');
+    if (!b) return;
+    const [a, bb] = b.dataset.compare.split('|');
+    const row = b.closest('[data-row]');
+    compare(a, bb, row ? seats.pairs[+row.dataset.row].cells : null);
+  }));
+
+  async function compare(a, b, cells) {
+    highlight(cells);
+    const d = await call('GET', '/api/admin/exams/' + monitorExam + '/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b));
+    $('seat-compare-title').textContent = '逐題比對：' + d.a.name + '（' + d.a.student_id + '）vs ' + d.b.name + '（' + d.b.student_id + '）';
+    const ans = s => s.text ? esc(s.text) + (s.score != null ? ' <span class="muted">' + fmtNum(s.score) + '</span>' : '') : '<span class="muted">未作答</span>';
+    $('seat-compare').innerHTML = '<tr><th>題號</th><th>題目</th><th>' + esc(d.a.name) + '</th><th>' + esc(d.b.name) + '</th><th>正解</th><th>作答時間差</th></tr>' +
+      d.questions.map(q => '<tr class="' + (q.same_wrong ? 'same-wrong' : q.same && q.gap_seconds != null && q.gap_seconds <= 30 ? 'same-sync' : '') + '">' +
+        '<td>' + q.no + '</td><td title="' + esc(q.stem) + '">' + esc(q.stem.length > 26 ? q.stem.slice(0, 26) + '…' : q.stem) + '</td>' +
+        '<td>' + ans(q.a) + '</td><td>' + ans(q.b) + '</td><td class="muted">' + esc(q.answer) + '</td>' +
+        '<td>' + (q.gap_seconds != null ? q.gap_seconds + ' 秒' : '') + '</td></tr>').join('');
+    $('seat-compare-card').classList.remove('hidden');
+    $('seat-compare-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   // ── 各題分析 ──

@@ -695,3 +695,73 @@ def test_focus_settings_validated(client):
     assert client.post("/api/admin/exams", json=bad, headers=h).status_code == 400
     bad = {"title": "x", "question_ids": [1], "focus_mode": "lock", "focus_limit": 0}
     assert client.post("/api/admin/exams", json=bad, headers=h).status_code == 400
+
+
+# ── 座位表與鄰座相似度 ──
+
+def test_seat_map_parsing_and_neighbors():
+    from app.seating import neighbor_pairs, parse_seat_map
+    grid = parse_seat_map("A1,A2,,A3\nB1\tB2\t\tB3\n\nC1,C2")
+    assert grid == [["A1", "A2", "", "A3"], ["B1", "B2", "", "B3"], ["C1", "C2", "", ""]]
+    pairs = {(grid[a[0]][a[1]], grid[b[0]][b[1]], rel) for a, b, rel in neighbor_pairs(grid)}
+    assert ("A1", "A2", "lr") in pairs and ("A2", "A3", "lr") not in pairs  # 走道隔開
+    assert ("A3", "B3", "fb") in pairs and ("B3", "", "fb") not in pairs
+    assert len(pairs) == 8  # 左右：A1A2 B1B2 C1C2；前後：A1B1 A2B2 A3B3 B1C1 B2C2
+
+def test_tail_probabilities():
+    from app.seating import count_tail, tail_probability
+    assert tail_probability([.5, .5], 0) == 1
+    assert abs(tail_probability([.5, .5], 2) - .25) < 1e-9
+    assert abs(tail_probability([.5, .5], 1) - .75) < 1e-9
+    assert tail_probability([.1] * 10, 8) < 1e-6
+    assert abs(count_tail(1, 1, 1) - (1 - 2.718281828 ** -1)) < 1e-6   # Poisson
+    assert count_tail(10, 1, 3) > count_tail(10, 1, 1)                  # 負二項較保守
+
+
+def test_analyzer_flags_shared_wrong_answers():
+    import random
+    from app.seating import Analyzer
+    rng = random.Random(1)
+    students = {}
+    for n in range(30):
+        ans = {}
+        for q in range(30):
+            wrong = rng.random() < .4
+            ans[q] = (str(rng.randrange(1, 5)) if wrong else "0", wrong, None)
+        students[f"S{n:02d}"] = ans
+    # S01 照抄 S00 的錯誤答案
+    students["S01"] = {q: v if v[1] or rng.random() < .3 else students["S01"][q]
+                       for q, v in students["S00"].items()}
+    an = Analyzer(students)
+    copied = an.judge("S00", "S01", tests=50)
+    assert copied["level"] == 2 and copied["eeic"] >= 8 and copied["reasons"]
+    honest = [an.judge(f"S{i:02d}", f"S{i + 1:02d}", tests=50) for i in range(2, 28)]
+    assert not any(h["level"] for h in honest)
+
+
+def test_seat_analysis_endpoint_and_compare(client):
+    h, exam_id = setup_exam(client)
+    started = {}
+    for sid, pc in (("11201", "A01"), ("11202", "A02"), ("11203", "")):
+        s = student_headers(client, sid)
+        st = client.post(f"/api/exams/{exam_id}/start", json={"device": pc}, headers=s).json()
+        for q in st["questions"]:
+            resp = 0 if q["type"] == "single" else ([0] if q["type"] == "multi" else ["x"] * q["blanks"])
+            client.put(f"/api/attempts/{st['attempt_id']}/answers", json={"question_id": q["id"], "response": resp}, headers=s)
+        client.post(f"/api/attempts/{st['attempt_id']}/submit", headers=s)
+        started[sid] = st
+    # 座位可以填電腦代碼或學號；認不出的格子另外列出
+    r = client.put(f"/api/admin/exams/{exam_id}/seats", json={"seat_map": "a01,A02\n11203,ZZ9"}, headers=h).json()
+    assert r["grid"][0][0]["student_id"] == "11201" and r["grid"][1][0]["student_id"] == "11203"
+    assert r["unmatched"] == ["ZZ9"] and r["unseated"] == []
+    rel = {(p["a"]["student_id"], p["b"]["student_id"]): p["relation"] for p in r["pairs"]}
+    assert rel == {("11201", "11202"): "lr", ("11201", "11203"): "fb"}
+    assert client.get(f"/api/admin/exams/{exam_id}/seats", headers=h).json()["seat_map"] == "a01,A02\n11203,ZZ9"
+    cmp = client.get(f"/api/admin/exams/{exam_id}/compare", params={"a": "11201", "b": "11202"}, headers=h).json()
+    assert len(cmp["questions"]) == 3 and all(q["same"] for q in cmp["questions"])
+    assert client.get(f"/api/admin/exams/{exam_id}/compare", params={"a": "11201", "b": "nobody"},
+                      headers=h).status_code == 404
+    too_big = "\n".join(["A"] * 61)
+    assert client.put(f"/api/admin/exams/{exam_id}/seats", json={"seat_map": too_big}, headers=h).status_code == 400
+    s = student_headers(client, "11201")
+    assert client.get(f"/api/admin/exams/{exam_id}/seats", headers=s).status_code == 401

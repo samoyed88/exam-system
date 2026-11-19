@@ -391,6 +391,33 @@ tr.flagged td { background: #fbefe9; }
 .timeline-ev.away { color: var(--ng); }
 .timeline-ev.sys { color: var(--brand); font-weight: 600; }
 a.link-cell { cursor: pointer; }
+
+/* ── 座位分析 ── */
+.seat-input { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 340px); gap: 1rem; align-items: start; }
+.seat-input .hint p { margin-bottom: .45rem; }
+.seat-front { text-align: center; font-family: var(--serif); letter-spacing: .4em; font-size: .85rem; color: var(--text-muted); border: 1px solid var(--border); border-bottom: 2px solid var(--rule); background: var(--surface-2); max-width: 280px; margin: .25rem auto 1rem; padding: .2rem; }
+.seat-scroll { overflow-x: auto; padding-bottom: .25rem; }
+.seat-grid { display: grid; margin: 0 auto; width: max-content; }
+.seat { width: 92px; min-height: 62px; border: 1px solid var(--border-strong); background: #fff; border-radius: 2px; padding: .3rem .4rem; font-size: .78rem; line-height: 1.35; }
+.seat .pc { font-family: var(--mono); font-size: .68rem; color: var(--text-muted); }
+.seat .nm { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seat .sc { font-family: var(--mono); font-size: .72rem; color: var(--text-muted); }
+.seat.aisle { border: none; background: none; width: 34px; }
+.seat.unmatched { border-style: dashed; background: var(--surface-2); color: var(--text-muted); }
+.seat.lv1 { border-color: #c48a2c; background: var(--warn-soft); }
+.seat.lv2 { border-color: var(--ng); background: var(--ng-soft); border-width: 2px; }
+.seat.hl { outline: 3px solid var(--brand); outline-offset: 1px; }
+.conn { position: relative; }
+.conn.h { width: 14px; }
+.conn.v { height: 14px; }
+.conn.lv1::after, .conn.lv2::after { content: ''; position: absolute; background: #c48a2c; cursor: pointer; }
+.conn.lv2::after { background: var(--ng); }
+.conn.h::after { left: -3px; right: -3px; top: calc(50% - 2px); height: 4px; }
+.conn.v::after { top: -3px; bottom: -3px; left: calc(50% - 2px); width: 4px; }
+tr.same-wrong td { background: var(--ng-soft); }
+tr.same-sync td { background: var(--warn-soft); }
+tr.pair-row { cursor: pointer; }
+@media (max-width: 960px) { .seat-input { grid-template-columns: 1fr; } }
 .chart .mark.sel { stroke: var(--text); stroke-width: 2; }
 .chart .hit { fill: transparent; cursor: pointer; }
 .chart .hit:hover { fill: rgba(31, 28, 23, .045); }

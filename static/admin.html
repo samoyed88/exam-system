@@ -144,6 +144,7 @@
     <a class="btn ghost sm" id="mon-csv" href="#">匯出成績 CSV</a>
     <button class="btn ghost sm" id="mon-scores">成績統計</button>
     <button class="btn ghost sm" id="mon-stats">各題分析</button>
+    <button class="btn ghost sm" id="mon-seats">座位分析</button>
   </div>
   <div class="summary" id="mon-summary"></div>
   <div class="table-wrap"><table id="mon-table"></table></div>
@@ -193,6 +194,54 @@
       <span class="muted">已交卷學生在這題的平均得分 ÷ 配分；點長條看該題分析</span>
     </div>
     <div class="chart" id="sc-qchart"></div>
+  </div>
+</section>
+
+<!-- 座位分析 -->
+<section id="view-seats" class="container wide hidden">
+  <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="seats-back">考場監控</a> / 座位分析</div>
+  <div class="toolbar"><h1 id="seats-title"></h1></div>
+  <p class="alert info">依座位表比對每一對左右、前後相鄰的同學：<b>兩人都答錯、而且錯成同一個答案</b>的題數，以及<b>30 秒內給出同一題相同答案</b>的題數，計算碰巧發生的機率（已考慮程度差異與檢查組數）。這是統計上的線索，不是作弊證據，請配合監考觀察判斷。</p>
+  <div class="card">
+    <div class="card-title">座位表</div>
+    <div class="seat-input">
+      <textarea id="seat-map" class="mono" rows="8" spellcheck="false" placeholder="PC01,PC02,PC03,,PC04,PC05,PC06&#10;PC07,PC08,PC09,,PC10,PC11,PC12"></textarea>
+      <div class="hint">
+        <p>每行一排，<b>第一行是最靠近講台的一排</b>。格子之間用逗號或 Tab 分隔，可直接從 Excel 複製貼上；<b>空格子代表走道</b>（走道兩側不算左右相鄰）。</p>
+        <p>格子可以填<b>電腦代碼</b>（學生在考場電腦開 /setup 設定的）或<b>學號</b>。</p>
+        <p id="seat-devices"></p>
+      </div>
+    </div>
+    <div class="row" style="margin-top:.75rem">
+      <button class="btn" id="seat-save">儲存並分析</button>
+      <button class="btn ghost hidden" id="seat-prev"></button>
+    </div>
+    <div class="msg" id="seat-msg"></div>
+  </div>
+  <div id="seat-result" class="hidden">
+    <div class="card">
+      <div class="chart-head">
+        <div class="card-title" style="margin:0">座位圖</div>
+        <div class="chart-legend" style="margin:0"><span><i class="sw ng"></i>高度可疑</span><span><i class="sw part"></i>需要留意</span><span><i class="sw empty"></i>座位沒有對應到交卷的學生</span><span class="muted">點格子間的紅線或下方表格看逐題比對</span></div>
+      </div>
+      <div class="seat-front">講　台</div>
+      <div class="seat-scroll"><div class="seat-grid" id="seat-grid"></div></div>
+      <div class="muted" id="seat-notes" style="margin-top:.6rem"></div>
+    </div>
+    <div class="card">
+      <div class="chart-head"><div class="card-title" style="margin:0">鄰座比對</div><span class="muted" id="seat-count"></span></div>
+      <div class="table-wrap scroll-table"><table id="seat-pairs"></table></div>
+    </div>
+    <div class="card hidden" id="seat-others-card">
+      <div class="card-title">不是鄰座、但相似度一樣高</div>
+      <p class="muted">可能用其他方式傳遞答案（手機、紙條），或是座位表填錯；以全班所有組合校正，門檻比鄰座嚴格。</p>
+      <div class="table-wrap"><table id="seat-others"></table></div>
+    </div>
+    <div class="card hidden" id="seat-compare-card">
+      <div class="chart-head"><div class="card-title" style="margin:0" id="seat-compare-title"></div>
+        <div class="chart-legend" style="margin:0"><span><i class="sw ng"></i>錯成同一個答案</span><span><i class="sw part"></i>30 秒內作答相同</span></div></div>
+      <div class="table-wrap scroll-table"><table id="seat-compare"></table></div>
+    </div>
   </div>
 </section>
 

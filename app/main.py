@@ -29,6 +29,7 @@ from .auth import (
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade
 from .roster import parse_csv, parse_xlsx
+from .seating import RELATION_TEXT, Analyzer, neighbor_pairs, normalize, parse_seat_map
 
 TZ = ZoneInfo(os.getenv("TZ_NAME", "Asia/Taipei"))
 GRACE_SECONDS = 30  # 網路延遲寬限：時間到後 30 秒內送達的作答仍收
@@ -1306,6 +1307,144 @@ def attempt_log(attempt_id: int, db=Depends(get_db)):
                         "class_name": student["class_name"] if student else ""},
             "attempt": {**dict(attempt), "seconds": used_seconds(dict(attempt))},
             "questions": questions, "timeline": timeline}
+
+
+class SeatMapIn(BaseModel):
+    seat_map: str
+
+
+def submitted_answers(db, exam_id: int) -> tuple[dict, dict]:
+    """已交卷學生的作答：學號 → {題目 id: (標準化答案, 是否答錯, 作答時間)}，以及作答紀錄列。"""
+    qs = {q["id"]: q for q in exam_questions(db, exam_id)}
+    attempts = {a["student_id"]: a for a in db.execute(
+        "SELECT a.*, s.name FROM attempts a LEFT JOIN students s ON s.student_id = a.student_id "
+        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL", (exam_id,))}
+    data: dict[str, dict] = {sid: {} for sid in attempts}
+    by_attempt = {a["id"]: sid for sid, a in attempts.items()}
+    for r in db.execute("SELECT ans.* FROM answers ans JOIN attempts a ON a.id = ans.attempt_id "
+                        "WHERE a.exam_id = ? AND a.submitted_at IS NOT NULL", (exam_id,)):
+        q = qs.get(r["question_id"])
+        resp = normalize(q["type"], json.loads(r["response"])) if q else None
+        if resp is None:
+            continue
+        wrong = (r["score"] or 0) < q["points"]
+        data[by_attempt[r["attempt_id"]]][q["id"]] = (resp, wrong, datetime.fromisoformat(r["updated_at"]))
+    return data, attempts
+
+
+@app.put("/api/admin/exams/{exam_id}/seats", dependencies=[admin])
+def save_seats(exam_id: int, body: SeatMapIn, db=Depends(get_db)):
+    exam_or_404(db, exam_id)
+    grid = parse_seat_map(body.seat_map)
+    if len(grid) > 60 or any(len(r) > 40 for r in grid):
+        raise HTTPException(400, "座位表最多 60 排、每排 40 個座位")
+    db.execute("UPDATE exams SET seat_map = ? WHERE id = ?", (body.seat_map.strip(), exam_id))
+    return seat_analysis(exam_id, db)
+
+
+@app.get("/api/admin/exams/{exam_id}/seats", dependencies=[admin])
+def seat_analysis(exam_id: int, db=Depends(get_db)):
+    exam = exam_or_404(db, exam_id)
+    prev = db.execute("SELECT id, title, seat_map FROM exams WHERE id != ? AND seat_map != '' "
+                      "ORDER BY id DESC LIMIT 1", (exam_id,)).fetchone()
+    out = {"seat_map": exam["seat_map"], "previous": dict(prev) if prev else None,
+           "grid": [], "pairs": [], "others": [], "unmatched": [], "unseated": []}
+    data, attempts = submitted_answers(db, exam_id)
+    out["devices"] = sorted({a["device"] for a in attempts.values() if a["device"]})
+    # 座位格可以填電腦代碼（學生在 /setup 設定的）或學號
+    by_device: dict[str, str] = {}
+    for sid, a in sorted(attempts.items(), key=lambda x: x[1]["started_at"]):
+        if a["device"]:
+            by_device[a["device"].strip().lower()] = sid
+    grid = parse_seat_map(exam["seat_map"])
+    seat_of: dict[tuple[int, int], str] = {}
+    for r, row in enumerate(grid):
+        cells = []
+        for c, label in enumerate(row):
+            if not label:
+                cells.append(None)
+                continue
+            sid = label if label in attempts else by_device.get(label.lower())
+            cell = {"label": label, "student_id": sid, "level": 0}
+            if sid:
+                seat_of[(r, c)] = sid
+                a = attempts[sid]
+                cell.update(name=a["name"] or "", score=a["score"], max_score=a["max_score"],
+                            attempt_id=a["id"])
+            else:
+                out["unmatched"].append(label)
+            cells.append(cell)
+        out["grid"].append(cells)
+    seated = set(seat_of.values())
+    out["unseated"] = [{"student_id": sid, "name": a["name"] or "", "device": a["device"]}
+                       for sid, a in sorted(attempts.items()) if sid not in seated]
+    if len(data) < 3:
+        return out  # 人數太少沒有比較基準
+    an = Analyzer(data)
+    seated_pairs = [(p1, p2, rel, seat_of.get(p1), seat_of.get(p2)) for p1, p2, rel in neighbor_pairs(grid)]
+    seated_pairs = [x for x in seated_pairs if x[3] and x[4] and x[3] != x[4]]
+    adjacent = {frozenset((a, b)) for *_, a, b in seated_pairs}
+    for (p1, p2, rel, a, b) in seated_pairs:
+        j = an.judge(a, b, len(seated_pairs))
+        out["pairs"].append({**j, "relation": rel, "relation_text": RELATION_TEXT[rel],
+                             "a": person(attempts[a]), "b": person(attempts[b]),
+                             "cells": [list(p1), list(p2)]})
+        for (r, c) in (p1, p2):
+            out["grid"][r][c]["level"] = max(out["grid"][r][c]["level"], j["level"])
+    out["pairs"].sort(key=lambda x: (-x["level"], x["chance"]))
+    # 不是鄰座、但相似度一樣高的組合（可能用其他方式傳答案）
+    # 沒有座位上的理由，要用全班組合數校正，門檻自然比鄰座嚴格
+    ids = sorted(data)
+    combos = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:] if frozenset((a, b)) not in adjacent]
+    others = []
+    for a, b in combos:
+        j = an.judge(a, b, len(combos))
+        if j["level"]:
+            others.append({**j, "a": person(attempts[a]), "b": person(attempts[b])})
+    out["others"] = sorted(others, key=lambda x: x["chance"])[:10]
+    return out
+
+
+def person(a: sqlite3.Row) -> dict:
+    return {"student_id": a["student_id"], "name": a["name"] or "", "score": a["score"],
+            "device": a["device"], "attempt_id": a["id"]}
+
+
+@app.get("/api/admin/exams/{exam_id}/compare", dependencies=[admin])
+def compare_students(exam_id: int, a: str, b: str, db=Depends(get_db)):
+    """兩位學生逐題對照（依考卷原本順序），標出錯得一樣與同時作答的題目。"""
+    rows = {r["student_id"]: r for r in db.execute(
+        "SELECT a.*, s.name FROM attempts a LEFT JOIN students s ON s.student_id = a.student_id "
+        "WHERE a.exam_id = ? AND a.student_id IN (?, ?)", (exam_id, a, b))}
+    if a not in rows or b not in rows:
+        raise HTTPException(404, "找不到這兩位學生的作答")
+    saved = {}
+    for r in db.execute("SELECT * FROM answers WHERE attempt_id IN (?, ?)",
+                        (rows[a]["id"], rows[b]["id"])):
+        saved[(r["attempt_id"], r["question_id"])] = r
+    out = []
+    for n, q in enumerate(exam_questions(db, exam_id)):
+        item = {"no": n + 1, "type": q["type"], "stem": q["stem"], "points": q["points"],
+                "answer": " / ".join(x[0] for x in json.loads(q["answer"])) if q["type"] == "fill"
+                else response_text(q, json.loads(q["answer"]))}
+        sides = []
+        for sid in (a, b):
+            r = saved.get((rows[sid]["id"], q["id"]))
+            resp = json.loads(r["response"]) if r else None
+            sides.append({"text": response_text(q, resp), "norm": normalize(q["type"], resp),
+                          "score": r["score"] if r else None, "at": r["updated_at"] if r else None})
+        same = sides[0]["norm"] is not None and sides[0]["norm"] == sides[1]["norm"]
+        wrong = [s["score"] is None or s["score"] < q["points"] for s in sides]
+        gap = None
+        if same and sides[0]["at"] and sides[1]["at"]:
+            gap = abs((datetime.fromisoformat(sides[0]["at"]) -
+                       datetime.fromisoformat(sides[1]["at"])).total_seconds())
+        item.update(a=sides[0], b=sides[1], same=same, same_wrong=same and all(wrong),
+                    gap_seconds=round(gap) if gap is not None else None)
+        for side in sides:
+            side.pop("norm")
+        out.append(item)
+    return {"a": person(rows[a]), "b": person(rows[b]), "questions": out}
 
 
 @app.post("/api/admin/questions/{qid}/accept-fill", dependencies=[admin])
