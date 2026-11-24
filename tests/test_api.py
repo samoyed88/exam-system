@@ -27,8 +27,18 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
+OWNER, OWNER_PW = "T0001", "owner-pass-123"
+
+
 def admin_headers(client):
-    token = client.post("/api/admin/login", json={"password": "teacher"}).json()["token"]
+    """測試用的最高管理員（已改過預設密碼）。共用密碼登入已停用，一律用帳號登入。"""
+    from app.auth import hash_password
+    from app.db import connect
+    conn = connect()
+    conn.execute("INSERT OR IGNORE INTO admins (account, name, password_hash, must_change, created_at, role) "
+                 "VALUES (?, '老師', ?, 0, '2026-01-01T00:00:00+00:00', 'owner')", (OWNER, hash_password(OWNER_PW)))
+    conn.close()
+    token = client.post("/api/admin/login", json={"account": OWNER, "password": OWNER_PW}).json()["token"]
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -489,10 +499,19 @@ def test_end_time_deadline_auto_submits(client):
 
 
 def test_admin_login_lockout(client):
+    admin_headers(client)
     for _ in range(10):
-        assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 401
-    assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 429
-    assert client.post("/api/admin/login", json={"password": "teacher"}).status_code == 429
+        assert client.post("/api/admin/login", json={"account": OWNER, "password": "wrong"}).status_code == 401
+    assert client.post("/api/admin/login", json={"account": OWNER, "password": "wrong"}).status_code == 429
+    assert client.post("/api/admin/login", json={"account": OWNER, "password": OWNER_PW}).status_code == 429
+
+
+def test_shared_password_login_disabled(client, monkeypatch):
+    # 知道共用密碼的人不能進後台；舊的共用密碼登入也立即失效
+    assert client.post("/api/admin/login", json={"password": "teacher"}).status_code == 401
+    from app.auth import ADMIN_TTL, admin_subject, make_token
+    old = {"Authorization": f"Bearer {make_token('a', admin_subject(), ADMIN_TTL)}"}
+    assert client.get("/api/admin/exams", headers=old).status_code == 401
 
 
 def test_unknown_student_ids_rate_limited(client):
@@ -515,11 +534,14 @@ def test_password_change_revokes_old_tokens(client):
     assert client.get("/api/exams", headers=new).status_code == 401
 
 
-def test_admin_token_bound_to_password(client, monkeypatch):
+def test_admin_token_bound_to_password(client):
     h = admin_headers(client)
     assert client.get("/api/admin/exams", headers=h).status_code == 200
-    from app import auth
-    monkeypatch.setattr(auth, "ADMIN_PASSWORD", "changed")
+    from app.auth import hash_password
+    from app.db import connect
+    conn = connect()
+    conn.execute("UPDATE admins SET password_hash = ? WHERE account = ?", (hash_password("changed-pass"), OWNER))
+    conn.close()
     assert client.get("/api/admin/exams", headers=h).status_code == 401
 
 
@@ -1032,12 +1054,13 @@ def logs(client, h, **params):
 
 
 def test_audit_log_records_admin_actions(client):
-    assert client.post("/api/admin/login", json={"password": "wrong"}).status_code == 401
+    admin_headers(client)
+    assert client.post("/api/admin/login", json={"account": OWNER, "password": "wrong"}).status_code == 401
     h, exam_id = setup_exam(client)
     rows = logs(client, h)
     login_ok = [r for r in rows if r["action"] == "後台登入" and r["status"] == 200]
     login_fail = [r for r in rows if r["action"] == "後台登入" and r["status"] == 401]
-    assert login_ok and login_fail and login_fail[0]["summary"] == "密碼錯誤"
+    assert login_ok and login_fail and login_fail[0]["summary"] == "帳號或密碼錯誤"
     # 這次登入之後的操作，工作階段代號和登入那筆相同
     created = next(r for r in rows if r["action"] == "新增考試")
     assert created["session"] and created["session"] == login_ok[0]["session"]
@@ -1096,7 +1119,7 @@ def admin_login_as(client, account, password):
 
 
 def test_admin_accounts(client):
-    h = admin_headers(client)                                     # 共用密碼照常可登入
+    h = admin_headers(client)                                     # 最高管理員
     assert client.post("/api/admin/admins", json={"account": "15130000", "name": "助教甲"}, headers=h).status_code == 200
     assert client.post("/api/admin/admins", json={"account": "15130000"}, headers=h).status_code == 409
     assert admin_login_as(client, "15130000", "wrong").status_code == 401
@@ -1118,19 +1141,28 @@ def test_admin_accounts(client):
     client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=ta)
     row = next(x for x in logs(client, h) if x["action"] == "新增班級")
     assert row["actor"] == "15130000"
-    assert next(x for x in logs(client, h) if x["action"] == "新增管理員")["actor"] == "共用密碼"
-    # 不能停用或刪除自己；停用、重設後舊登入失效
-    assert client.put("/api/admin/admins/15130000", json={"name": "助教甲", "disabled": True}, headers=ta).status_code == 400
-    assert client.delete("/api/admin/admins/15130000", headers=ta).status_code == 400
+    assert next(x for x in logs(client, h) if x["action"] == "新增管理員")["actor"] == OWNER
+    # 一般管理員不能管理管理員帳號
+    assert client.get("/api/admin/admins", headers=ta).status_code == 403
+    assert client.post("/api/admin/admins", json={"account": "x1"}, headers=ta).status_code == 403
+    # 最高管理員不能停用、降級或刪除自己；系統至少保留一位最高管理員
+    assert client.put(f"/api/admin/admins/{OWNER}", json={"name": "老師", "disabled": True}, headers=h).status_code == 400
+    assert client.put(f"/api/admin/admins/{OWNER}", json={"name": "老師", "role": "admin"}, headers=h).status_code == 400
+    assert client.delete(f"/api/admin/admins/{OWNER}", headers=h).status_code == 400
+    # 升級為最高管理員後，可以把原本的最高管理員降級；最後一位不能降
+    client.put("/api/admin/admins/15130000", json={"name": "助教甲", "role": "owner"}, headers=h)
+    assert client.get("/api/admin/admins", headers=ta).status_code == 200
+    assert client.put(f"/api/admin/admins/{OWNER}", json={"name": "老師", "role": "admin"}, headers=ta).status_code == 200
+    assert client.put("/api/admin/admins/15130000", json={"name": "助教甲", "role": "admin"}, headers=ta).status_code == 400
+    client.put(f"/api/admin/admins/{OWNER}", json={"name": "老師", "role": "owner"}, headers=ta)
+    client.put("/api/admin/admins/15130000", json={"name": "助教甲", "role": "admin"}, headers=h)
     client.post("/api/admin/admins/15130000/reset-password", headers=h)
     assert client.get("/api/admin/exams", headers=ta).status_code == 401
     assert admin_login_as(client, "15130000", "mcujava11501").json()["must_change"] is True
     client.put("/api/admin/admins/15130000", json={"name": "助教甲", "disabled": True}, headers=h)
     assert admin_login_as(client, "15130000", "mcujava11501").status_code == 401
-    assert [a["account"] for a in client.get("/api/admin/admins", headers=h).json()] == ["15130000"]
+    assert [a["account"] for a in client.get("/api/admin/admins", headers=h).json()] == ["15130000", OWNER]
     assert client.delete("/api/admin/admins/15130000", headers=h).status_code == 200
-    # 共用密碼不能透過網頁改
-    assert client.post("/api/admin/me/password", json={"old_password": "teacher", "new_password": "whatever123"}, headers=h).status_code == 400
 
 
 # ── 模擬作答 ──

@@ -82,14 +82,16 @@ def admin_identity(token: str, db) -> dict:
     """後台 token → 是誰。共用密碼登入為 shared；帳號登入要檢查帳號仍存在、沒停用、密碼沒換過。"""
     subject = read_token(token, "a")
     if subject == admin_subject():
-        return {"account": "", "name": "共用密碼", "shared": True, "must_change": False}
+        # 共用密碼登入已停用：知道密碼的人都能進來，無法追到個人。舊的共用密碼登入一律失效
+        raise HTTPException(401, "共用密碼登入已停用，請用管理員帳號登入")
     if not subject.startswith("u:"):
         raise HTTPException(401, "登入資訊無效，請重新登入")
     account, _, version = subject[2:].rpartition("|")
     row = db.execute("SELECT * FROM admins WHERE account = ?", (account,)).fetchone()
     if not row or row["disabled"] or password_version(row["password_hash"]) != version:
         raise HTTPException(401, "登入資訊無效，請重新登入")
-    return {"account": account, "name": row["name"], "shared": False, "must_change": bool(row["must_change"])}
+    return {"account": account, "name": row["name"], "shared": False, "must_change": bool(row["must_change"]),
+            "role": row["role"]}
 
 
 def require_admin_self(authorization: str = Header(""), db=Depends(get_db)) -> dict:
@@ -101,6 +103,14 @@ def require_admin(authorization: str = Header(""), db=Depends(get_db)) -> dict:
     me = admin_identity(_bearer(authorization), db)
     if me["must_change"]:
         raise HTTPException(403, "請先修改預設密碼")
+    return me
+
+
+def require_owner(authorization: str = Header(""), db=Depends(get_db)) -> dict:
+    """最高管理員才能用（管理管理員帳號）。"""
+    me = require_admin(authorization, db)
+    if me["role"] != "owner":
+        raise HTTPException(403, "只有最高管理員可以管理管理員帳號")
     return me
 
 

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS students (
 );
 
 -- 管理員帳號：帳號（學號）＋密碼登入後台；新帳號用預設密碼，第一次登入必須修改。
--- 原本 .env 的 ADMIN_PASSWORD 共用密碼仍可登入（帳號留空）
+-- role：owner 最高管理員（可管理管理員帳號）、admin 一般管理員。共用密碼登入已停用。
 CREATE TABLE IF NOT EXISTS admins (
     account       TEXT PRIMARY KEY,
     name          TEXT NOT NULL DEFAULT '',
@@ -167,6 +167,7 @@ MIGRATIONS = [
     ("exam_questions", "points", "REAL"),          # 這場考試的配分；NULL = 用題庫預設配分
     ("classes", "grade_order", "TEXT NOT NULL DEFAULT ''"),  # 助教成績總表的學號順序（JSON），匯出時照這個順序
     ("questions", "case_sensitive", "INTEGER NOT NULL DEFAULT 0"),  # 填充題比對是否區分大小寫（Moodle SHORTANSWER_C）
+    ("admins", "role", "TEXT NOT NULL DEFAULT 'admin'"),  # owner 最高管理員、admin 一般管理員
 ]
 
 

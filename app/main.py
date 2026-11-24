@@ -25,7 +25,7 @@ from pydantic import BaseModel
 from .auth import (
     ADMIN_TTL, admin_account_token, admin_subject, check_admin_password, client_ip, current_student,
     hash_password, ip_allowed, login_locked, make_token, record_failure, require_admin, require_admin_self,
-    student_token, token_actor, verify_password,
+    require_owner, student_token, token_actor, verify_password,
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade, statement_blanks, strip_statement_semicolon
@@ -769,7 +769,7 @@ admin = Depends(require_admin)
 
 
 class AdminLoginIn(BaseModel):
-    account: str = ""      # 留空 = 用 .env 的共用密碼登入（原本的方式）
+    account: str = ""
     password: str
 
 
@@ -842,15 +842,11 @@ def admin_login(body: AdminLoginIn, request: Request):
     if login_locked(key, limit=10, window=900):
         raise HTTPException(429, "密碼錯誤次數太多，請 15 分鐘後再試")
     account = body.account.strip()
-    if account:
-        return admin_account_login(account, body.password, key)
-    if not check_admin_password(body.password):
-        record_failure(key)
-        audit.note("密碼錯誤", actor="共用密碼")
-        raise HTTPException(401, "密碼錯誤")
-    token = make_token("a", admin_subject(), ADMIN_TTL)
-    audit.note("登入成功", session=audit.session_code(token), actor="共用密碼")
-    return {"token": token, "account": "", "name": "共用密碼", "must_change": False}
+    if not account:
+        # 共用密碼登入已停用：只有個人帳號，日誌才追得到是誰
+        audit.note("沒有輸入帳號（共用密碼登入已停用）")
+        raise HTTPException(401, "請輸入管理員帳號（共用密碼登入已停用）")
+    return admin_account_login(account, body.password, key)
 
 
 def admin_account_login(account: str, password: str, ip_key: str) -> dict:
@@ -869,7 +865,8 @@ def admin_account_login(account: str, password: str, ip_key: str) -> dict:
         token = admin_account_token(account, row["password_hash"])
         audit.note("登入成功" + ("（尚未修改預設密碼）" if row["must_change"] else ""),
                    session=audit.session_code(token), actor=account)
-        return {"token": token, "account": account, "name": row["name"], "must_change": bool(row["must_change"])}
+        return {"token": token, "account": account, "name": row["name"], "must_change": bool(row["must_change"]),
+                "role": row["role"]}
     finally:
         db.close()
 
@@ -879,14 +876,19 @@ def admin_account_login(account: str, password: str, ip_key: str) -> dict:
 ADMIN_DEFAULT_PASSWORD = os.getenv("ADMIN_DEFAULT_PASSWORD", "")
 
 
+ROLES = {"owner": "最高管理員", "admin": "一般管理員"}
+
+
 class AdminIn(BaseModel):
     account: str
     name: str = ""
+    role: str = "admin"
 
 
 class AdminUpdateIn(BaseModel):
     name: str
     disabled: bool = False
+    role: str | None = None   # 沒帶就不改
 
 
 class AdminPasswordIn(BaseModel):
@@ -908,7 +910,7 @@ def admin_or_404(db, account: str) -> sqlite3.Row:
 
 
 def public_admin(r: sqlite3.Row) -> dict:
-    return {"account": r["account"], "name": r["name"], "must_change": bool(r["must_change"]),
+    return {"account": r["account"], "name": r["name"], "role": r["role"], "must_change": bool(r["must_change"]),
             "disabled": bool(r["disabled"]), "created_at": r["created_at"], "last_login": r["last_login"]}
 
 
@@ -919,8 +921,6 @@ def admin_me(me=Depends(require_admin_self)):
 
 @app.post("/api/admin/me/password")
 def change_my_password(body: AdminPasswordIn, me=Depends(require_admin_self), db=Depends(get_db)):
-    if me["shared"]:
-        raise HTTPException(400, "共用密碼請在伺服器的 .env 修改（ADMIN_PASSWORD）")
     row = admin_or_404(db, me["account"])
     if not verify_password(body.old_password, row["password_hash"]):
         audit.note("舊密碼錯誤")
@@ -936,37 +936,57 @@ def change_my_password(body: AdminPasswordIn, me=Depends(require_admin_self), db
     return {"ok": True, "token": admin_account_token(me["account"], pw_hash)}
 
 
-@app.get("/api/admin/admins", dependencies=[admin])
+owner = Depends(require_owner)
+
+
+def keep_one_owner(db, account: str) -> None:
+    """不能讓系統沒有啟用中的最高管理員，否則沒有人能管理帳號。"""
+    left = db.execute("SELECT COUNT(*) FROM admins WHERE role = 'owner' AND disabled = 0 AND account != ?",
+                      (account,)).fetchone()[0]
+    if not left:
+        raise HTTPException(400, "至少要保留一位啟用中的最高管理員")
+
+
+@app.get("/api/admin/admins", dependencies=[owner])
 def list_admins(db=Depends(get_db)):
     return [public_admin(r) for r in db.execute("SELECT * FROM admins ORDER BY account")]
 
 
-@app.post("/api/admin/admins", dependencies=[admin])
+@app.post("/api/admin/admins", dependencies=[owner])
 def create_admin(body: AdminIn, db=Depends(get_db)):
     account = body.account.strip()
+    if body.role not in ROLES:
+        raise HTTPException(400, "權限只能是最高管理員或一般管理員")
     if not account or len(account) > 40 or "|" in account or ":" in account:
         raise HTTPException(400, "帳號不能空白，最多 40 字，不能有 | 或 :")
     if db.execute("SELECT 1 FROM admins WHERE account = ?", (account,)).fetchone():
         raise HTTPException(409, "已經有這個管理員帳號")
-    db.execute("INSERT INTO admins (account, name, password_hash, must_change, created_at) VALUES (?, ?, ?, 1, ?)",
-               (account, body.name.strip(), default_admin_hash(), now().isoformat()))
-    audit.note(f"{account} {body.name.strip()}（預設密碼，第一次登入須修改）", target=f"管理員 {account}")
+    db.execute("INSERT INTO admins (account, name, password_hash, must_change, created_at, role) VALUES (?, ?, ?, 1, ?, ?)",
+               (account, body.name.strip(), default_admin_hash(), now().isoformat(), body.role))
+    audit.note(f"{account} {body.name.strip()}，{ROLES[body.role]}（預設密碼，第一次登入須修改）", target=f"管理員 {account}")
     return {"ok": True}
 
 
-@app.put("/api/admin/admins/{account}", dependencies=[admin])
-def update_admin(account: str, body: AdminUpdateIn, me=Depends(require_admin), db=Depends(get_db)):
+@app.put("/api/admin/admins/{account}", dependencies=[owner])
+def update_admin(account: str, body: AdminUpdateIn, me=Depends(require_owner), db=Depends(get_db)):
     old = admin_or_404(db, account)
-    if account == me["account"] and body.disabled:
-        raise HTTPException(400, "不能停用自己的帳號")
-    diff = audit.changes({"name": old["name"], "disabled": bool(old["disabled"])},
-                         {"name": body.name.strip(), "disabled": body.disabled}, {"name": "姓名", "disabled": "停用"})
-    db.execute("UPDATE admins SET name = ?, disabled = ? WHERE account = ?", (body.name.strip(), int(body.disabled), account))
+    role = body.role or old["role"]
+    if role not in ROLES:
+        raise HTTPException(400, "權限只能是最高管理員或一般管理員")
+    if account == me["account"] and (body.disabled or role != "owner"):
+        raise HTTPException(400, "不能停用自己或降低自己的權限")
+    if old["role"] == "owner" and (body.disabled or role != "owner"):
+        keep_one_owner(db, account)
+    diff = audit.changes({"name": old["name"], "disabled": bool(old["disabled"]), "role": ROLES[old["role"]]},
+                         {"name": body.name.strip(), "disabled": body.disabled, "role": ROLES[role]},
+                         {"name": "姓名", "disabled": "停用", "role": "權限"})
+    db.execute("UPDATE admins SET name = ?, disabled = ?, role = ? WHERE account = ?",
+               (body.name.strip(), int(body.disabled), role, account))
     audit.note(f"{account}：" + ("、".join(diff) or "沒有變更"), diff, target=f"管理員 {account}")
     return {"ok": True}
 
 
-@app.post("/api/admin/admins/{account}/reset-password", dependencies=[admin])
+@app.post("/api/admin/admins/{account}/reset-password", dependencies=[owner])
 def reset_admin_password(account: str, db=Depends(get_db)):
     admin_or_404(db, account)
     db.execute("UPDATE admins SET password_hash = ?, must_change = 1 WHERE account = ?", (default_admin_hash(), account))
@@ -974,11 +994,13 @@ def reset_admin_password(account: str, db=Depends(get_db)):
     return {"ok": True}
 
 
-@app.delete("/api/admin/admins/{account}", dependencies=[admin])
-def delete_admin(account: str, me=Depends(require_admin), db=Depends(get_db)):
+@app.delete("/api/admin/admins/{account}", dependencies=[owner])
+def delete_admin(account: str, me=Depends(require_owner), db=Depends(get_db)):
     old = admin_or_404(db, account)
     if account == me["account"]:
         raise HTTPException(400, "不能刪除自己的帳號")
+    if old["role"] == "owner":
+        keep_one_owner(db, account)
     db.execute("DELETE FROM admins WHERE account = ?", (account,))
     audit.note(f"{account} {old['name']}", target=f"管理員 {account}")
     return {"ok": True}

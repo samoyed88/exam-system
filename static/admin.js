@@ -38,9 +38,11 @@
 
   async function loadMe() {
     try { me = await api('GET', '/api/admin/me', undefined, token); } catch (err) { me = null; }
-    $('whoami').textContent = me ? (me.shared ? '共用密碼登入' : me.name ? me.name + '（' + me.account + '）' : me.account) : '';
+    $('whoami').textContent = me ? (me.name ? me.name + '（' + me.account + '）' : me.account) + (me.role === 'owner' ? '・最高管理員' : '') : '';
     $('whoami').classList.toggle('hidden', !me);
-    $('my-pw').classList.toggle('hidden', !me || me.shared);
+    $('my-pw').classList.toggle('hidden', !me);
+    // 「管理員」分頁只有最高管理員看得到
+    document.querySelector('#tabs [data-tab="admins"]').classList.toggle('hidden', !me || me.role !== 'owner');
     return me;
   }
 
@@ -88,7 +90,7 @@
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
     $('whoami').classList.toggle('hidden', view === 'login' || !me);
-    $('my-pw').classList.toggle('hidden', view === 'login' || !me || me.shared);
+    $('my-pw').classList.toggle('hidden', view === 'login' || !me);
     if (view !== 'monitor') clearInterval(monitorTimer);
     const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
@@ -156,7 +158,8 @@
       if (!m) {
         $('exam-form').classList.add('hidden');
         $('q-form').classList.add('hidden');
-        return openTab(['exams', 'questions', 'students', 'logs', 'admins'].includes(h) ? h : 'exams');
+        const tabs = ['exams', 'questions', 'students', 'logs'].concat(me && me.role === 'owner' ? ['admins'] : []);
+        return openTab(tabs.includes(h) ? h : 'exams');
       }
       monitorExam = +m[1];
       if (!m[2]) return openMonitor(monitorExam);
@@ -1684,8 +1687,10 @@
   async function loadAdmins() {
     const list = await call('GET', '/api/admin/admins');
     const when = iso => iso ? fmtTime(iso) : '—';
-    $('ad-table').innerHTML = '<tr><th>帳號</th><th>姓名</th><th>狀態</th><th>最後登入</th><th>建立時間</th><th></th></tr>' +
-      (list.map(a => '<tr><td>' + esc(a.account) + '</td><td>' + esc(a.name) + '</td>' +
+    const roleSelect = a => '<select class="inline-select" data-ad-role="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '"' +
+      (me && a.account === me.account ? ' disabled' : '') + '>' + Object.entries(ROLE_TEXT).map(([v, t]) => '<option value="' + v + '"' + (a.role === v ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>';
+    $('ad-table').innerHTML = '<tr><th>帳號</th><th>姓名</th><th>權限</th><th>狀態</th><th>最後登入</th><th>建立時間</th><th></th></tr>' +
+      (list.map(a => '<tr><td>' + esc(a.account) + '</td><td>' + esc(a.name) + '</td><td>' + roleSelect(a) + '</td>' +
         '<td>' + (a.disabled ? '<span class="badge ng">已停用</span>' : a.must_change ? '<span class="badge warn">尚未改預設密碼</span>' : '<span class="badge ok">使用中</span>') + '</td>' +
         '<td>' + when(a.last_login) + '</td><td>' + when(a.created_at) + '</td>' +
         '<td class="row">' + (me && a.account === me.account ? '<span class="muted">（你自己）</span>' :
@@ -1693,12 +1698,26 @@
           '<button class="btn ghost sm" data-ad-reset="' + esc(a.account) + '">重設密碼</button>' +
           '<button class="btn ghost sm" data-ad-toggle="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '">' + (a.disabled ? '啟用' : '停用') + '</button>' +
           '<button class="btn danger sm" data-ad-del="' + esc(a.account) + '">刪除</button>') + '</td></tr>').join('') ||
-        '<tr><td colspan="6" class="muted">還沒有管理員帳號。</td></tr>');
+        '<tr><td colspan="7" class="muted">還沒有管理員帳號。</td></tr>');
   }
+
+  const ROLE_TEXT = { admin: '一般管理員', owner: '最高管理員' };
+
+  $('ad-table').addEventListener('change', async e => {
+    const d = e.target.dataset;
+    if (!d.adRole) return;
+    const role = e.target.value;
+    if (!confirm('把「' + d.adRole + '」改為' + ROLE_TEXT[role] + '？')) { loadAdmins(); return; }
+    try {
+      await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adRole), { name: d.name, disabled: d.disabled === '1', role });
+      say('ad-msg', '已改為' + ROLE_TEXT[role], true);
+    } catch (err) { say('ad-msg', err.message); }
+    loadAdmins();
+  });
 
   $('ad-add').addEventListener('click', async () => {
     try {
-      await call('POST', '/api/admin/admins', { account: $('ad-account').value, name: $('ad-name').value });
+      await call('POST', '/api/admin/admins', { account: $('ad-account').value, name: $('ad-name').value, role: $('ad-role').value });
       say('ad-msg', '已新增「' + $('ad-account').value.trim() + '」，請告訴對方用預設密碼登入，第一次登入會要求改密碼', true);
       $('ad-account').value = $('ad-name').value = '';
       loadAdmins();
