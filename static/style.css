@@ -463,6 +463,10 @@ tr.avg-row td { font-weight: 700; background: var(--surface-2); border-top: 1.5p
 .blank-line .blank-text { word-break: break-all; }
 .blank-line .accept { margin-left: auto; font-family: inherit; font-size: .72rem; padding: .05rem .5rem; }
 
+/* 自動更新狀態 */
+.live { font-size: .8rem; font-family: var(--mono); }
+.live.ng { color: var(--ng); font-family: inherit; }
+
 /* ── 操作日誌 ── */
 #log-table td { vertical-align: top; }
 #log-table .when { white-space: nowrap; font-family: var(--mono); font-size: .82rem; }

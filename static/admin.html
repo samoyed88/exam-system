@@ -155,7 +155,7 @@
   <div class="crumbs"><a href="#" data-back>考試</a> / 考場監控</div>
   <div class="toolbar">
     <h1 id="mon-title"></h1>
-    <span class="muted">每 5 秒自動更新</span>
+    <span class="muted live" id="mon-updated">每 5 秒自動更新</span>
     <a class="btn ghost sm" id="mon-csv" href="#">匯出成績 CSV</a>
     <button class="btn ghost sm" id="mon-scores">成績統計</button>
     <button class="btn ghost sm" id="mon-stats">各題分析</button>
@@ -255,6 +255,7 @@
   <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="grades-back">考場監控</a> / 成績總表</div>
   <div class="toolbar">
     <h1 id="grades-title"></h1>
+    <span class="muted live" id="grades-updated"></span>
     <label class="inline-field">顯示<select id="grades-mode"><option value="question">逐題檢視</option><option value="score">總表（每題得分）</option></select></label>
     <label class="inline-field">排序<select id="grades-sort"><option value="id">學號</option><option value="high">成績高 → 低</option><option value="low">成績低 → 高</option></select></label>
     <button class="btn sm" id="grades-xlsx">匯出 Excel</button>
@@ -346,6 +347,7 @@
   <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="attempt-mon">考場監控</a> / <span id="attempt-from"></span>作答紀錄</div>
   <div class="toolbar">
     <h1 id="at-title"></h1>
+    <span class="muted live" id="at-updated"></span>
     <button class="btn ghost sm" id="attempt-back">← 返回</button>
   </div>
   <div class="summary" id="at-summary"></div>

@@ -127,6 +127,29 @@
     if (!routing && location.hash !== hash) history.pushState(null, '', hash);
   }
 
+  // ── 自動更新：考試進行中，成績總表、作答紀錄、考試列表也跟著更新（監控頁另外每 5 秒）──
+
+  function liveStatus(id, err, label) {
+    const t = new Date();
+    $(id).classList.toggle('ng', !!err);
+    $(id).textContent = err ? '更新失敗，稍後自動重試（' + err.message + '）'
+      : label + '・最後更新 ' + [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  }
+
+  // 重畫表格時保留捲動位置，不然每次自動更新都會跳回最上面
+  function keepScroll(render) {
+    const boxes = [...document.querySelectorAll('.scroll-table')].map(el => [el, el.scrollTop]);
+    render();
+    boxes.forEach(([el, top]) => { el.scrollTop = top; });
+  }
+
+  setInterval(() => {
+    if (!token || document.hidden || document.querySelector('#modal:not(.hidden)')) return;
+    if (currentView === 'grades' && grades) loadGrades(true);
+    else if (currentView === 'attempt' && currentAttempt) openAttempt(currentAttempt, attemptFrom, true);
+    else if (currentView === 'exams' && $('exam-form').classList.contains('hidden')) loadExams();
+  }, 10000);
+
   // ── 網址與畫面對應 ──
 
   let routing = false;         // 依網址切換畫面時不要再新增一筆瀏覽紀錄
@@ -451,7 +474,8 @@
   async function refreshMonitor() {
     let data;
     try { data = await call('GET', '/api/admin/exams/' + monitorExam + '/monitor'); }
-    catch (err) { return; }
+    catch (err) { return liveStatus('mon-updated', err); }
+    liveStatus('mon-updated', null, '每 5 秒自動更新');
     $('mon-title').textContent = data.exam.title;
     $('mon-title').dataset.exam = monitorExam;
     const count = s => data.rows.filter(r => r.status === s).length;
@@ -768,13 +792,15 @@
   $('attempt-back').addEventListener('click', () => attemptFrom === 'scores' ? loadScores() : attemptFrom === 'grades' ? loadGrades() : openMonitor(monitorExam));
   $('attempt-mon').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
 
-  async function openAttempt(id, from) {
+  async function openAttempt(id, from, refresh) {
     currentAttempt = id;
     attemptFrom = from;
-    show('attempt');
-    tip(null, null);
+    if (!refresh) { show('attempt'); tip(null, null); }
     $('attempt-from').innerHTML = from === 'scores' ? '成績統計 / ' : from === 'grades' ? '成績總表 / ' : '';
-    const d = await call('GET', '/api/admin/attempts/' + id + '/log');
+    let d;
+    try { d = await call('GET', '/api/admin/attempts/' + id + '/log'); }
+    catch (err) { if (refresh) return liveStatus('at-updated', err); throw err; }
+    const scrolls = [...document.querySelectorAll('.scroll-table')].map(el => [el, el.scrollTop]);
     const a = d.attempt, qs = d.questions;
     $('at-title').textContent = d.student.name + '（' + d.student.student_id + '）：' + d.exam.title;
     const answered = qs.filter(q => q.response).length;
@@ -814,6 +840,8 @@
         return '<tr><td>' + clockText(e.at) + '</td><td class="muted">' + clock(sec) + '</td>' +
           '<td class="timeline-ev ' + cls + '">' + esc(text) + '</td></tr>';
       }).join('');
+    scrolls.forEach(([el, top]) => { el.scrollTop = top; });
+    liveStatus('at-updated', null, a.submitted_at ? '已交卷' : '作答中・每 10 秒自動更新');
   }
 
   function renderDwellChart(qs) {
@@ -943,20 +971,21 @@
   const MARK = { right: '<span class="mark-right" title="答對">✓</span>', wrong: '<span class="mark-wrong" title="答錯">✗</span>',
     partial: '<span class="mark-partial" title="部分得分">◐</span>', blank: '<span class="mark-blank" title="未作答">－</span>' };
 
-  $('mon-grades').addEventListener('click', loadGrades);
+  $('mon-grades').addEventListener('click', () => loadGrades());
   $('grades-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
   $('grades-mode').addEventListener('change', renderGrades);
   $('grades-sort').addEventListener('change', renderGrades);
   $('grades-xlsx').addEventListener('click', () => download('/api/admin/exams/' + monitorExam + '/grades.xlsx',
     $('grades-title').textContent.replace('：成績總表', '') + '-成績.xlsx'));
 
-  async function loadGrades() {
-    show('grades');
-    $('grades-msg').textContent = '';
-    grades = await call('GET', '/api/admin/exams/' + monitorExam + '/gradebook');
+  async function loadGrades(refresh) {
+    if (!refresh) { show('grades'); $('grades-msg').textContent = ''; }
+    try { grades = await call('GET', '/api/admin/exams/' + monitorExam + '/gradebook'); }
+    catch (err) { if (refresh) return liveStatus('grades-updated', err); throw err; }
     $('grades-title').textContent = grades.exam.title + '：成績總表';
     renderGradeOrder();
-    renderGrades();
+    keepScroll(renderGrades);
+    liveStatus('grades-updated', null, '每 10 秒自動更新');
   }
 
   function renderGradeOrder() {
