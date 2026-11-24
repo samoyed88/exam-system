@@ -41,7 +41,47 @@
     if (view !== 'monitor') clearInterval(monitorTimer);
     const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    // 每個畫面有自己的網址（#exam/6/grades），瀏覽器「返回」回到上一個後台畫面，重新整理也停在原畫面
+    if (view !== 'login' && !routing) {
+      const hash = '#' + hashFor(view);
+      if (location.hash !== hash) history.pushState(null, '', hash);
+    }
   }
+
+  // ── 網址與畫面對應 ──
+
+  let routing = false;         // 依網址切換畫面時不要再新增一筆瀏覽紀錄
+  let currentAttempt = null;
+  const EXAM_VIEWS = { monitor: '', scores: 'scores', stats: 'stats', items: 'items', grades: 'grades', seats: 'seats' };
+
+  function hashFor(view) {
+    if (view === 'attempt') return 'exam/' + monitorExam + '/attempt/' + currentAttempt;
+    if (view in EXAM_VIEWS) return 'exam/' + monitorExam + (EXAM_VIEWS[view] ? '/' + EXAM_VIEWS[view] : '');
+    return view;
+  }
+
+  async function route() {
+    const h = decodeURIComponent(location.hash.slice(1));
+    const m = h.match(/^exam\/(\d+)(?:\/(\w+)(?:\/(\d+))?)?$/);
+    routing = true;
+    try {
+      if (!m) return openTab(['exams', 'questions', 'students', 'logs'].includes(h) ? h : 'exams');
+      monitorExam = +m[1];
+      if (!m[2]) return openMonitor(monitorExam);
+      // 直接開子畫面（重新整理、返回）時，標題要先有考試名稱
+      if ($('mon-title').dataset.exam !== String(monitorExam)) {
+        try { $('mon-title').textContent = (await call('GET', '/api/admin/exams/' + monitorExam)).title; } catch (err) { return openTab('exams'); }
+        $('mon-title').dataset.exam = monitorExam;
+      }
+      const open = { scores: loadScores, stats: () => loadStats(), items: loadItems, grades: loadGrades, seats: loadSeats,
+        attempt: () => openAttempt(+m[3], 'monitor') }[m[2]];
+      (open || (() => openMonitor(monitorExam)))();
+    } finally {
+      routing = false;
+    }
+  }
+
+  window.addEventListener('popstate', () => { if (token) route(); });
 
   function logout() {
     token = null;
@@ -56,7 +96,7 @@
       token = r.token;
       store('exam_admin_token', token);
       $('pw').value = '';
-      openTab('exams');
+      route();
     } catch (err) {
       say('login-msg', err.message);
     }
@@ -302,6 +342,7 @@
     try { data = await call('GET', '/api/admin/exams/' + monitorExam + '/monitor'); }
     catch (err) { return; }
     $('mon-title').textContent = data.exam.title;
+    $('mon-title').dataset.exam = monitorExam;
     const count = s => data.rows.filter(r => r.status === s).length;
     const done = data.rows.filter(r => r.status === 'submitted');
     const avg = done.length ? (done.reduce((s, r) => s + r.score, 0) / done.length).toFixed(1) : '-';
@@ -617,6 +658,7 @@
   $('attempt-mon').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
 
   async function openAttempt(id, from) {
+    currentAttempt = id;
     attemptFrom = from;
     show('attempt');
     tip(null, null);
@@ -1523,5 +1565,5 @@
     $('class-seat-notes').innerHTML = notes.join('<br>');
   }
 
-  if (token) openTab('exams'); else show('login');
+  if (token) route(); else show('login');
 })();
