@@ -23,9 +23,9 @@ from starlette.datastructures import URL, Headers, MutableHeaders
 from pydantic import BaseModel
 
 from .auth import (
-    ADMIN_TTL, admin_subject, check_admin_password, client_ip, current_student, hash_password,
-    ip_allowed, login_locked, make_token, record_failure, require_admin, student_token,
-    verify_password,
+    ADMIN_TTL, admin_account_token, admin_subject, check_admin_password, client_ip, current_student,
+    hash_password, ip_allowed, login_locked, make_token, record_failure, require_admin, require_admin_self,
+    student_token, token_actor, verify_password,
 )
 from .db import connect, get_db, init_db
 from .grading import fill_match, grade, statement_blanks, strip_statement_semicolon
@@ -132,7 +132,8 @@ class AuditMiddleware:
                 return  # 沒登入的請求不記，避免被灌爆
             headers = Headers(scope=scope)
             bearer = headers.get("authorization", "").removeprefix("Bearer ").strip()
-            row = dict(actor="後台", ip=client_ip(Request(scope)), device=audit.device_name(headers.get("user-agent", "")),
+            row = dict(actor=ctx.get("actor") or token_actor(bearer) or "後台", ip=client_ip(Request(scope)),
+                       device=audit.device_name(headers.get("user-agent", "")),
                        session=ctx.get("session") or audit.session_code(bearer),
                        action=audit.ACTIONS.get(endpoint, endpoint or path), target=ctx.get("target", ""),
                        summary=ctx.get("summary", ""), detail=ctx.get("detail"), status=status["code"],
@@ -756,6 +757,7 @@ admin = Depends(require_admin)
 
 
 class AdminLoginIn(BaseModel):
+    account: str = ""      # 留空 = 用 .env 的共用密碼登入（原本的方式）
     password: str
 
 
@@ -827,13 +829,147 @@ def admin_login(body: AdminLoginIn, request: Request):
     key = f"admin|{client_ip(request)}"
     if login_locked(key, limit=10, window=900):
         raise HTTPException(429, "密碼錯誤次數太多，請 15 分鐘後再試")
+    account = body.account.strip()
+    if account:
+        return admin_account_login(account, body.password, key)
     if not check_admin_password(body.password):
         record_failure(key)
-        audit.note("密碼錯誤")
+        audit.note("密碼錯誤", actor="共用密碼")
         raise HTTPException(401, "密碼錯誤")
     token = make_token("a", admin_subject(), ADMIN_TTL)
-    audit.note("登入成功", session=audit.session_code(token))
-    return {"token": token}
+    audit.note("登入成功", session=audit.session_code(token), actor="共用密碼")
+    return {"token": token, "account": "", "name": "共用密碼", "must_change": False}
+
+
+def admin_account_login(account: str, password: str, ip_key: str) -> dict:
+    db = connect()
+    try:
+        row = db.execute("SELECT * FROM admins WHERE account = ?", (account,)).fetchone()
+        # 帳號不存在、密碼錯誤用同一個訊息，避免被試出有哪些帳號
+        if not row or not verify_password(password, row["password_hash"]):
+            record_failure(ip_key)
+            audit.note("帳號或密碼錯誤", actor=account)
+            raise HTTPException(401, "帳號或密碼錯誤")
+        if row["disabled"]:
+            audit.note("帳號已停用", actor=account)
+            raise HTTPException(401, "這個管理員帳號已停用")
+        db.execute("UPDATE admins SET last_login = ? WHERE account = ?", (now().isoformat(), account))
+        token = admin_account_token(account, row["password_hash"])
+        audit.note("登入成功" + ("（尚未修改預設密碼）" if row["must_change"] else ""),
+                   session=audit.session_code(token), actor=account)
+        return {"token": token, "account": account, "name": row["name"], "must_change": bool(row["must_change"])}
+    finally:
+        db.close()
+
+
+# ── 管理員帳號 ──
+
+ADMIN_DEFAULT_PASSWORD = os.getenv("ADMIN_DEFAULT_PASSWORD", "")
+
+
+class AdminIn(BaseModel):
+    account: str
+    name: str = ""
+
+
+class AdminUpdateIn(BaseModel):
+    name: str
+    disabled: bool = False
+
+
+class AdminPasswordIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
+def default_admin_hash() -> str:
+    if not ADMIN_DEFAULT_PASSWORD:
+        raise HTTPException(500, "伺服器沒有設定 ADMIN_DEFAULT_PASSWORD（.env）")
+    return hash_password(ADMIN_DEFAULT_PASSWORD)
+
+
+def admin_or_404(db, account: str) -> sqlite3.Row:
+    row = db.execute("SELECT * FROM admins WHERE account = ?", (account,)).fetchone()
+    if not row:
+        raise HTTPException(404, "找不到這個管理員帳號")
+    return row
+
+
+def public_admin(r: sqlite3.Row) -> dict:
+    return {"account": r["account"], "name": r["name"], "must_change": bool(r["must_change"]),
+            "disabled": bool(r["disabled"]), "created_at": r["created_at"], "last_login": r["last_login"]}
+
+
+@app.get("/api/admin/me")
+def admin_me(me=Depends(require_admin_self)):
+    return me
+
+
+@app.post("/api/admin/me/password")
+def change_my_password(body: AdminPasswordIn, me=Depends(require_admin_self), db=Depends(get_db)):
+    if me["shared"]:
+        raise HTTPException(400, "共用密碼請在伺服器的 .env 修改（ADMIN_PASSWORD）")
+    row = admin_or_404(db, me["account"])
+    if not verify_password(body.old_password, row["password_hash"]):
+        audit.note("舊密碼錯誤")
+        raise HTTPException(400, "舊密碼不正確")
+    new = body.new_password
+    if len(new) < 8:
+        raise HTTPException(400, "新密碼至少 8 個字元")
+    if new == ADMIN_DEFAULT_PASSWORD or new == me["account"] or new == body.old_password:
+        raise HTTPException(400, "新密碼不能是預設密碼、帳號或舊密碼")
+    pw_hash = hash_password(new)
+    db.execute("UPDATE admins SET password_hash = ?, must_change = 0 WHERE account = ?", (pw_hash, me["account"]))
+    audit.note(f"{me['account']} {me['name']}", target=f"管理員 {me['account']}")
+    return {"ok": True, "token": admin_account_token(me["account"], pw_hash)}
+
+
+@app.get("/api/admin/admins", dependencies=[admin])
+def list_admins(db=Depends(get_db)):
+    return [public_admin(r) for r in db.execute("SELECT * FROM admins ORDER BY account")]
+
+
+@app.post("/api/admin/admins", dependencies=[admin])
+def create_admin(body: AdminIn, db=Depends(get_db)):
+    account = body.account.strip()
+    if not account or len(account) > 40 or "|" in account or ":" in account:
+        raise HTTPException(400, "帳號不能空白，最多 40 字，不能有 | 或 :")
+    if db.execute("SELECT 1 FROM admins WHERE account = ?", (account,)).fetchone():
+        raise HTTPException(409, "已經有這個管理員帳號")
+    db.execute("INSERT INTO admins (account, name, password_hash, must_change, created_at) VALUES (?, ?, ?, 1, ?)",
+               (account, body.name.strip(), default_admin_hash(), now().isoformat()))
+    audit.note(f"{account} {body.name.strip()}（預設密碼，第一次登入須修改）", target=f"管理員 {account}")
+    return {"ok": True}
+
+
+@app.put("/api/admin/admins/{account}", dependencies=[admin])
+def update_admin(account: str, body: AdminUpdateIn, me=Depends(require_admin), db=Depends(get_db)):
+    old = admin_or_404(db, account)
+    if account == me["account"] and body.disabled:
+        raise HTTPException(400, "不能停用自己的帳號")
+    diff = audit.changes({"name": old["name"], "disabled": bool(old["disabled"])},
+                         {"name": body.name.strip(), "disabled": body.disabled}, {"name": "姓名", "disabled": "停用"})
+    db.execute("UPDATE admins SET name = ?, disabled = ? WHERE account = ?", (body.name.strip(), int(body.disabled), account))
+    audit.note(f"{account}：" + ("、".join(diff) or "沒有變更"), diff, target=f"管理員 {account}")
+    return {"ok": True}
+
+
+@app.post("/api/admin/admins/{account}/reset-password", dependencies=[admin])
+def reset_admin_password(account: str, db=Depends(get_db)):
+    admin_or_404(db, account)
+    db.execute("UPDATE admins SET password_hash = ?, must_change = 1 WHERE account = ?", (default_admin_hash(), account))
+    audit.note(f"{account} 改回預設密碼（下次登入須修改）", target=f"管理員 {account}")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/admins/{account}", dependencies=[admin])
+def delete_admin(account: str, me=Depends(require_admin), db=Depends(get_db)):
+    old = admin_or_404(db, account)
+    if account == me["account"]:
+        raise HTTPException(400, "不能刪除自己的帳號")
+    db.execute("DELETE FROM admins WHERE account = ?", (account,))
+    audit.note(f"{account} {old['name']}", target=f"管理員 {account}")
+    return {"ok": True}
 
 
 @app.get("/api/admin/logs", dependencies=[admin])

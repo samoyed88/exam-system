@@ -13,6 +13,18 @@ CREATE TABLE IF NOT EXISTS students (
     password_hash TEXT NOT NULL DEFAULT ''  -- 空 = 尚未設定密碼，只輸入學號即可登入
 );
 
+-- 管理員帳號：帳號（學號）＋密碼登入後台；新帳號用預設密碼，第一次登入必須修改。
+-- 原本 .env 的 ADMIN_PASSWORD 共用密碼仍可登入（帳號留空）
+CREATE TABLE IF NOT EXISTS admins (
+    account       TEXT PRIMARY KEY,
+    name          TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    must_change   INTEGER NOT NULL DEFAULT 1,
+    disabled      INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    last_login    TEXT NOT NULL DEFAULT ''
+);
+
 -- 後台操作日誌（見 app/audit.py）
 CREATE TABLE IF NOT EXISTS admin_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,

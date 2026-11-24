@@ -73,9 +73,46 @@ def admin_subject() -> str:
     return hmac.new(SECRET_KEY, b"admin:" + ADMIN_PASSWORD.encode(), hashlib.sha256).hexdigest()[:16]
 
 
-def require_admin(authorization: str = Header("")) -> None:
-    if read_token(_bearer(authorization), "a") != admin_subject():
+def admin_account_token(account: str, password_hash: str) -> str:
+    # 帳號登入的 token 帶密碼版本：改密碼、被重設或停用後舊 token 立即失效
+    return make_token("a", f"u:{account}|{password_version(password_hash)}", ADMIN_TTL)
+
+
+def admin_identity(token: str, db) -> dict:
+    """後台 token → 是誰。共用密碼登入為 shared；帳號登入要檢查帳號仍存在、沒停用、密碼沒換過。"""
+    subject = read_token(token, "a")
+    if subject == admin_subject():
+        return {"account": "", "name": "共用密碼", "shared": True, "must_change": False}
+    if not subject.startswith("u:"):
         raise HTTPException(401, "登入資訊無效，請重新登入")
+    account, _, version = subject[2:].rpartition("|")
+    row = db.execute("SELECT * FROM admins WHERE account = ?", (account,)).fetchone()
+    if not row or row["disabled"] or password_version(row["password_hash"]) != version:
+        raise HTTPException(401, "登入資訊無效，請重新登入")
+    return {"account": account, "name": row["name"], "shared": False, "must_change": bool(row["must_change"])}
+
+
+def require_admin_self(authorization: str = Header(""), db=Depends(get_db)) -> dict:
+    """已登入的管理員（還沒改預設密碼也可以），給「修改自己的密碼」等少數端點用。"""
+    return admin_identity(_bearer(authorization), db)
+
+
+def require_admin(authorization: str = Header(""), db=Depends(get_db)) -> dict:
+    me = admin_identity(_bearer(authorization), db)
+    if me["must_change"]:
+        raise HTTPException(403, "請先修改預設密碼")
+    return me
+
+
+def token_actor(token: str) -> str:
+    """日誌用：從 token 看出是哪個帳號（不查資料庫，查不到就空白）。"""
+    try:
+        subject = read_token(token, "a")
+    except HTTPException:
+        return ""
+    if subject == admin_subject():
+        return "共用密碼"
+    return subject[2:].rpartition("|")[0] if subject.startswith("u:") else ""
 
 
 def hash_password(password: str) -> str:

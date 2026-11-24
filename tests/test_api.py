@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["ADMIN_PASSWORD"] = "teacher"
 os.environ["SECRET_KEY"] = "test-secret-0123456789"
+os.environ["ADMIN_DEFAULT_PASSWORD"] = "mcujava11501"
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -1086,3 +1087,47 @@ def test_fill_ignores_insignificant_spaces_and_statement_semicolons():
     # for(…)、println(…) 裡多打分號會編譯失敗，不算對
     assert grade("fill", key, ["double[] students", "students=new double[3]", "i=0;", "i<3", "students[i];"],
                  full, case_sensitive=True, statement=statement_blanks(code, 5)) == 3
+
+
+# ── 管理員帳號 ──
+
+def admin_login_as(client, account, password):
+    return client.post("/api/admin/login", json={"account": account, "password": password})
+
+
+def test_admin_accounts(client):
+    h = admin_headers(client)                                     # 共用密碼照常可登入
+    assert client.post("/api/admin/admins", json={"account": "15130000", "name": "助教甲"}, headers=h).status_code == 200
+    assert client.post("/api/admin/admins", json={"account": "15130000"}, headers=h).status_code == 409
+    assert admin_login_as(client, "15130000", "wrong").status_code == 401
+    assert admin_login_as(client, "nobody", "mcujava11501").json()["detail"] == "帳號或密碼錯誤"
+    r = admin_login_as(client, "15130000", "mcujava11501").json()
+    assert r["must_change"] is True and r["name"] == "助教甲"
+    ta = {"Authorization": f"Bearer {r['token']}"}
+    # 還沒改預設密碼前，除了改密碼之外都不能用
+    assert client.get("/api/admin/exams", headers=ta).status_code == 403
+    assert client.get("/api/admin/me", headers=ta).json()["must_change"] is True
+    bad = client.post("/api/admin/me/password", json={"old_password": "mcujava11501", "new_password": "mcujava11501"}, headers=ta)
+    assert bad.status_code == 400
+    assert client.post("/api/admin/me/password", json={"old_password": "x", "new_password": "longenough1"}, headers=ta).status_code == 400
+    r = client.post("/api/admin/me/password", json={"old_password": "mcujava11501", "new_password": "ta-secret-99"}, headers=ta).json()
+    assert client.get("/api/admin/exams", headers=ta).status_code == 401          # 舊 token 失效
+    ta = {"Authorization": f"Bearer {r['token']}"}
+    assert client.get("/api/admin/exams", headers=ta).status_code == 200
+    # 日誌記到帳號
+    client.post("/api/admin/classes", json={"name": "資管一乙"}, headers=ta)
+    row = next(x for x in logs(client, h) if x["action"] == "新增班級")
+    assert row["actor"] == "15130000"
+    assert next(x for x in logs(client, h) if x["action"] == "新增管理員")["actor"] == "共用密碼"
+    # 不能停用或刪除自己；停用、重設後舊登入失效
+    assert client.put("/api/admin/admins/15130000", json={"name": "助教甲", "disabled": True}, headers=ta).status_code == 400
+    assert client.delete("/api/admin/admins/15130000", headers=ta).status_code == 400
+    client.post("/api/admin/admins/15130000/reset-password", headers=h)
+    assert client.get("/api/admin/exams", headers=ta).status_code == 401
+    assert admin_login_as(client, "15130000", "mcujava11501").json()["must_change"] is True
+    client.put("/api/admin/admins/15130000", json={"name": "助教甲", "disabled": True}, headers=h)
+    assert admin_login_as(client, "15130000", "mcujava11501").status_code == 401
+    assert [a["account"] for a in client.get("/api/admin/admins", headers=h).json()] == ["15130000"]
+    assert client.delete("/api/admin/admins/15130000", headers=h).status_code == 200
+    # 共用密碼不能透過網頁改
+    assert client.post("/api/admin/me/password", json={"old_password": "teacher", "new_password": "whatever123"}, headers=h).status_code == 400

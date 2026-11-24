@@ -23,6 +23,8 @@ ACTIONS = {
     "save_seats": "修改考試座位表", "import_seats": "匯入考試座位表",
     "set_grade_order": "上傳成績總表順序", "clear_grade_order": "清除成績總表順序",
     "force_submit": "替學生強制交卷", "reset_attempt": "刪除作答（讓學生重考）", "unlock_attempt": "解鎖作答",
+    "create_admin": "新增管理員", "update_admin": "修改管理員", "reset_admin_password": "重設管理員密碼",
+    "delete_admin": "刪除管理員", "change_my_password": "修改自己的密碼",
     "results_csv": "下載成績 CSV", "exam_items_csv": "下載試題分析 CSV", "export_grades_xlsx": "匯出成績 Excel",
 }
 
@@ -32,7 +34,7 @@ def session_code(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:6] if token else ""
 
 
-def note(summary: str, detail: dict | None = None, target: str = "", session: str = "") -> None:
+def note(summary: str, detail: dict | None = None, target: str = "", session: str = "", actor: str = "") -> None:
     """在處理函式裡補充這次操作的摘要；不在後台請求中（例如測試或指令）時不做事。"""
     ctx = CURRENT.get()
     if ctx is None:
@@ -44,6 +46,8 @@ def note(summary: str, detail: dict | None = None, target: str = "", session: st
         ctx["target"] = target
     if session:
         ctx["session"] = session
+    if actor:
+        ctx["actor"] = actor
 
 
 def changes(before: dict, after: dict, labels: dict[str, str] | None = None) -> dict:

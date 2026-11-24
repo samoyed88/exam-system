@@ -24,9 +24,58 @@
   function call(method, path, body) {
     return api(method, path, body, token).catch(err => {
       if (err.status === 401) logout();
+      if (err.status === 403 && err.message === '請先修改預設密碼') {
+        forcePasswordChange();
+        return new Promise(() => {});  // 改完密碼後會重新載入畫面，原本的請求不用再處理
+      }
       throw err;
     });
   }
+
+  // ── 目前登入的管理員、修改密碼 ──
+
+  let me = null;               // {account, name, shared, must_change}
+
+  async function loadMe() {
+    try { me = await api('GET', '/api/admin/me', undefined, token); } catch (err) { me = null; }
+    $('whoami').textContent = me ? (me.shared ? '共用密碼登入' : me.name ? me.name + '（' + me.account + '）' : me.account) : '';
+    $('whoami').classList.toggle('hidden', !me);
+    $('my-pw').classList.toggle('hidden', !me || me.shared);
+    return me;
+  }
+
+  // 第一次用預設密碼登入：一定要改完才能用；自己按「修改密碼」時可以取消
+  async function changePassword(forced) {
+    let error = '';
+    for (;;) {
+      const ok = await ask(forced ? '請先修改預設密碼' : '修改密碼',
+        (forced ? '<p>這個帳號還在使用預設密碼，改完之後才能使用後台。</p>' : '') +
+        '<label>目前的密碼</label><input type="password" id="cp-old" autocomplete="current-password">' +
+        '<label>新密碼（至少 8 個字元）</label><input type="password" id="cp-new" autocomplete="new-password">' +
+        '<label>再輸入一次新密碼</label><input type="password" id="cp-again" autocomplete="new-password">' +
+        (error ? '<div class="msg ng">' + esc(error) + '</div>' : ''), '修改密碼', forced ? '登出' : '取消');
+      if (!ok) { if (forced) logout(); return false; }
+      const oldPw = $('cp-old').value, newPw = $('cp-new').value;
+      if (newPw !== $('cp-again').value) { error = '兩次輸入的新密碼不一樣'; continue; }
+      try {
+        const r = await api('POST', '/api/admin/me/password', { old_password: oldPw, new_password: newPw }, token);
+        token = r.token;
+        store('exam_admin_token', token);
+        await loadMe();
+        return true;
+      } catch (err) { error = err.message; }
+    }
+  }
+
+  let forcing = false;
+  async function forcePasswordChange() {
+    if (forcing) return;
+    forcing = true;
+    try { if (await changePassword(true)) route(); } finally { forcing = false; }
+  }
+
+  $('my-pw').addEventListener('click', async () => { if (await changePassword(false)) alertSaved(); });
+  function alertSaved() { $('whoami').textContent += '　✓ 密碼已更新'; setTimeout(loadMe, 3000); }
 
   function say(id, text, ok) {
     $(id).textContent = text;
@@ -34,10 +83,12 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students', 'logs'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students', 'logs', 'admins'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
+    $('whoami').classList.toggle('hidden', view === 'login' || !me);
+    $('my-pw').classList.toggle('hidden', view === 'login' || !me || me.shared);
     if (view !== 'monitor') clearInterval(monitorTimer);
     const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
@@ -65,7 +116,7 @@
     const m = h.match(/^exam\/(\d+)(?:\/(\w+)(?:\/(\d+))?)?$/);
     routing = true;
     try {
-      if (!m) return openTab(['exams', 'questions', 'students', 'logs'].includes(h) ? h : 'exams');
+      if (!m) return openTab(['exams', 'questions', 'students', 'logs', 'admins'].includes(h) ? h : 'exams');
       monitorExam = +m[1];
       if (!m[2]) return openMonitor(monitorExam);
       // 直接開子畫面（重新整理、返回）時，標題要先有考試名稱
@@ -85,6 +136,7 @@
 
   function logout() {
     token = null;
+    me = null;
     store('exam_admin_token', null);
     show('login');
   }
@@ -92,10 +144,13 @@
   $('login-form').addEventListener('submit', async e => {
     e.preventDefault();
     try {
-      const r = await api('POST', '/api/admin/login', { password: $('pw').value });
+      const r = await api('POST', '/api/admin/login', { account: $('acct').value, password: $('pw').value });
       token = r.token;
       store('exam_admin_token', token);
       $('pw').value = '';
+      $('login-msg').textContent = '';
+      await loadMe();
+      if (r.must_change) { show('exams'); return forcePasswordChange(); }
       route();
     } catch (err) {
       say('login-msg', err.message);
@@ -110,6 +165,7 @@
     if (tab === 'questions') loadQuestions();
     if (tab === 'students') loadStudents();
     if (tab === 'logs') loadLogs();
+    if (tab === 'admins') loadAdmins();
   }
 
   function readFile(input) {
@@ -1565,5 +1621,55 @@
     $('class-seat-notes').innerHTML = notes.join('<br>');
   }
 
-  if (token) route(); else show('login');
+  // ── 管理員帳號 ──
+
+  async function loadAdmins() {
+    const list = await call('GET', '/api/admin/admins');
+    const when = iso => iso ? fmtTime(iso) : '—';
+    $('ad-table').innerHTML = '<tr><th>帳號</th><th>姓名</th><th>狀態</th><th>最後登入</th><th>建立時間</th><th></th></tr>' +
+      (list.map(a => '<tr><td>' + esc(a.account) + '</td><td>' + esc(a.name) + '</td>' +
+        '<td>' + (a.disabled ? '<span class="badge ng">已停用</span>' : a.must_change ? '<span class="badge warn">尚未改預設密碼</span>' : '<span class="badge ok">使用中</span>') + '</td>' +
+        '<td>' + when(a.last_login) + '</td><td>' + when(a.created_at) + '</td>' +
+        '<td class="row">' + (me && a.account === me.account ? '<span class="muted">（你自己）</span>' :
+          '<button class="btn ghost sm" data-ad-rename="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '">改姓名</button>' +
+          '<button class="btn ghost sm" data-ad-reset="' + esc(a.account) + '">重設密碼</button>' +
+          '<button class="btn ghost sm" data-ad-toggle="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '">' + (a.disabled ? '啟用' : '停用') + '</button>' +
+          '<button class="btn danger sm" data-ad-del="' + esc(a.account) + '">刪除</button>') + '</td></tr>').join('') ||
+        '<tr><td colspan="6" class="muted">還沒有管理員帳號。</td></tr>');
+  }
+
+  $('ad-add').addEventListener('click', async () => {
+    try {
+      await call('POST', '/api/admin/admins', { account: $('ad-account').value, name: $('ad-name').value });
+      say('ad-msg', '已新增「' + $('ad-account').value.trim() + '」，請告訴對方用預設密碼登入，第一次登入會要求改密碼', true);
+      $('ad-account').value = $('ad-name').value = '';
+      loadAdmins();
+    } catch (err) { say('ad-msg', err.message); }
+  });
+
+  $('ad-table').addEventListener('click', async e => {
+    const t = e.target, d = t.dataset;
+    try {
+      if (d.adRename) {
+        const name = prompt('「' + d.adRename + '」的姓名', d.name);
+        if (name == null) return;
+        await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adRename), { name, disabled: d.disabled === '1' });
+      } else if (d.adReset) {
+        if (!confirm('把「' + d.adReset + '」的密碼改回預設密碼？對方目前的登入會失效，下次登入要重新設定密碼。')) return;
+        await call('POST', '/api/admin/admins/' + encodeURIComponent(d.adReset) + '/reset-password');
+        say('ad-msg', '已改回預設密碼', true);
+      } else if (d.adToggle) {
+        const disable = d.disabled !== '1';
+        if (disable && !confirm('停用「' + d.adToggle + '」？對方會立即被登出，之後不能登入。')) return;
+        await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adToggle), { name: d.name, disabled: disable });
+      } else if (d.adDel) {
+        if (!confirm('刪除管理員帳號「' + d.adDel + '」？日誌裡的紀錄會保留。')) return;
+        await call('DELETE', '/api/admin/admins/' + encodeURIComponent(d.adDel));
+      } else return;
+      loadAdmins();
+    } catch (err) { say('ad-msg', err.message); }
+  });
+
+  if (token) loadMe().then(m => { if (m && m.must_change) { show('exams'); forcePasswordChange(); } else route(); });
+  else show('login');
 })();
