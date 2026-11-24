@@ -1067,22 +1067,14 @@ def test_audit_log_records_admin_actions(client):
     assert logs(client, h)[0]["actor"] == "系統指令"
 
 
-# ── 空格不同、多打分號但仍能編譯的程式碼答案算對 ──
+# ── 程式碼填充題：空格不同算對、多打分號算錯 ──
 
-def test_fill_ignores_insignificant_spaces_and_statement_semicolons():
-    from app.grading import fill_match, statement_blanks
+def test_fill_ignores_insignificant_spaces_only():
+    from app.grading import fill_match
     assert fill_match("students[0] = 5", ["students[0]=5"], case_sensitive=True)
     assert fill_match("double[]students", ["double[] students"], case_sensitive=True)
     assert fill_match("i < students.length", ["i<students.length"], case_sensitive=True)
     assert fill_match("largest num=18,smallest num=2", ["largest num = 18, smallest num = 2"])
     assert not fill_match("doublestudents", ["double students"], case_sensitive=True)   # 英數字之間的空白不能少
     assert not fill_match("largest num = 18 smallest num = 2", ["largest num = 18, smallest num = 2"])  # 少了逗號
-    code = "      【1】 ;//宣告\n      【2】 ; //配置\n      for (int 【3】 ;【4】 ;i++)\n         System.out.println( 【5】 );"
-    assert statement_blanks(code, 5) == [True, True, False, False, False]
-    key = [["double[] students"], ["students=new double[3]"], ["i=0"], ["i<3"], ["students[i]"]]
-    full = 5
-    assert grade("fill", key, ["double[] students;", "students = new double[3] ;", "i=0", "i<3", "students[i]"],
-                 full, case_sensitive=True, statement=statement_blanks(code, 5)) == full
-    # for(…)、println(…) 裡多打分號會編譯失敗，不算對
-    assert grade("fill", key, ["double[] students", "students=new double[3]", "i=0;", "i<3", "students[i];"],
-                 full, case_sensitive=True, statement=statement_blanks(code, 5)) == 3
+    assert not fill_match("students[0]=5;", ["students[0]=5"], case_sensitive=True)    # 題目已有分號，多打算錯
