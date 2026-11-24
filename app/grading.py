@@ -13,6 +13,16 @@ def normalize(text: str, fold: bool = True) -> str:
     return text.casefold() if fold else text
 
 
+def statement_blanks(code: str, count: int) -> list[bool]:
+    """程式碼裡哪些空格是「獨立一行、後面接分號」的敘述（例如「   【3】 ; //設定…」）。
+    這種空格學生多打一個分號，放回去變成 ;; 仍能編譯，可以算對；for(…)、println(…) 裡的空格不行。"""
+    return [bool(re.search(rf"^\s*【{k}】\s*;", code or "", re.M)) for k in range(1, count + 1)]
+
+
+def strip_statement_semicolon(response: str) -> str:
+    return re.sub(r"[\s;]+$", "", response) if response.rstrip().endswith(";") else response
+
+
 # 只認一般小數與分數。Fraction 也吃 1e999999999 這種指數寫法，展開要算好幾小時，
 # 交卷評分時又握著資料庫寫入鎖，一個學生就能讓全場卡住
 NUMBER = re.compile(r"[-+]?(\d{1,30}(\.\d{0,30})?|\.\d{1,30})(/\d{1,30})?")
@@ -45,7 +55,7 @@ def fill_match(response: str, accepted: list[str], case_sensitive: bool = False)
 
 def grade(qtype: str, answer, response, points: float,
           multi_mode: str = "all", num_options: int = 0, weights: list[float] | None = None,
-          case_sensitive: bool = False) -> float:
+          case_sensitive: bool = False, statement: list[bool] | None = None) -> float:
     """回傳這題得分；response 為 None 代表沒作答。"""
     if response is None:
         return 0.0
@@ -70,10 +80,12 @@ def grade(qtype: str, answer, response, points: float,
         if not isinstance(response, list) or not answer:
             return 0.0
         per_blank = points / len(answer)
-        # 題目已經給了分號，學生多打的分號算錯（老師決定）；只放寬空格
+        statement = statement or []
         hits = sum(
             1 for i, accepted in enumerate(answer)
-            if i < len(response) and fill_match(response[i], accepted, case_sensitive)
+            if i < len(response) and fill_match(
+                strip_statement_semicolon(response[i]) if i < len(statement) and statement[i] else response[i],
+                accepted, case_sensitive)
         )
         return round(per_blank * hits, 4)
     return 0.0
