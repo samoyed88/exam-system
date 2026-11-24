@@ -93,10 +93,36 @@
     const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
     // 每個畫面有自己的網址（#exam/6/grades），瀏覽器「返回」回到上一個後台畫面，重新整理也停在原畫面
-    if (view !== 'login' && !routing) {
-      const hash = '#' + hashFor(view);
-      if (location.hash !== hash) history.pushState(null, '', hash);
+    currentView = view;
+    if (view !== 'login' && !routing) setHash(hashFor(view));
+    updateTitle();
+  }
+
+  // ── 瀏覽器分頁標題：跟著目前畫面與表單變 ──
+
+  let currentView = 'login';
+
+  function updateTitle() {
+    let text = '';
+    if (currentView === 'login') text = '登入';
+    else if (currentView === 'exams' && !$('exam-form').classList.contains('hidden'))
+      text = editingExam ? '編輯考試：' + ($('e-title').value.trim() || '#' + editingExam) : '新增考試';
+    else if (currentView === 'questions' && !$('q-form').classList.contains('hidden')) text = $('q-form-title').textContent;
+    else if (currentView === 'monitor') text = ($('mon-title').textContent ? $('mon-title').textContent + '：' : '') + '考場監控';
+    else {
+      const h = document.querySelector('#view-' + currentView + ' h1');
+      text = h ? h.textContent.trim() : '';
     }
+    document.title = (text ? text + '｜' : '') + '考試後台';
+  }
+
+  // 各畫面的標題多半是資料載入後才填上，標題文字或表單開關一變就跟著更新
+  new MutationObserver(updateTitle).observe(document.body, { subtree: true, childList: true, characterData: true,
+    attributes: true, attributeFilter: ['class'] });
+
+  function setHash(hash) {
+    hash = hash.startsWith('#') ? hash : '#' + hash;
+    if (!routing && location.hash !== hash) history.pushState(null, '', hash);
   }
 
   // ── 網址與畫面對應 ──
@@ -114,9 +140,24 @@
   async function route() {
     const h = decodeURIComponent(location.hash.slice(1));
     const m = h.match(/^exam\/(\d+)(?:\/(\w+)(?:\/(\d+))?)?$/);
+    const qm = h.match(/^question\/(\d+)\/edit$/);
     routing = true;
     try {
-      if (!m) return openTab(['exams', 'questions', 'students', 'logs', 'admins'].includes(h) ? h : 'exams');
+      if (h === 'exams/new' || (m && m[2] === 'edit')) {
+        openTab('exams');
+        return await openExamForm(h === 'exams/new' ? null : +m[1]);
+      }
+      if (h === 'questions/new' || qm) {
+        show('questions');
+        await loadQuestions();
+        if (qm && !questions.some(q => q.id === +qm[1])) return;
+        return openQForm(qm ? +qm[1] : null);
+      }
+      if (!m) {
+        $('exam-form').classList.add('hidden');
+        $('q-form').classList.add('hidden');
+        return openTab(['exams', 'questions', 'students', 'logs', 'admins'].includes(h) ? h : 'exams');
+      }
       monitorExam = +m[1];
       if (!m[2]) return openMonitor(monitorExam);
       // 直接開子畫面（重新整理、返回）時，標題要先有考試名稱
@@ -160,6 +201,8 @@
   document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => openTab(b.dataset.tab)));
 
   function openTab(tab) {
+    $('exam-form').classList.add('hidden');
+    $('q-form').classList.add('hidden');
     show(tab);
     if (tab === 'exams') loadExams();
     if (tab === 'questions') loadQuestions();
@@ -211,9 +254,16 @@
   });
 
   $('new-exam').addEventListener('click', () => openExamForm(null));
-  $('cancel-exam').addEventListener('click', () => $('exam-form').classList.add('hidden'));
+  $('cancel-exam').addEventListener('click', closeExamForm);
+  function closeExamForm() {
+    $('exam-form').classList.add('hidden');
+    setHash('exams');
+    updateTitle();
+  }
+  $('e-title').addEventListener('input', updateTitle);
 
   async function openExamForm(id) {
+    setHash(id ? 'exam/' + id + '/edit' : 'exams/new');
     let classList;
     [questions, classList] = await Promise.all([call('GET', '/api/admin/questions'), call('GET', '/api/admin/classes')]);
     editingExam = id;
@@ -365,7 +415,7 @@
     try {
       if (editingExam) await call('PUT', '/api/admin/exams/' + editingExam, body);
       else await call('POST', '/api/admin/exams', body);
-      $('exam-form').classList.add('hidden');
+      closeExamForm();
       loadExams();
     } catch (err) {
       say('exam-msg', err.message);
@@ -1259,7 +1309,12 @@
 
   $('q-filter').addEventListener('input', renderQuestions);
   $('new-q').addEventListener('click', () => openQForm(null));
-  $('cancel-q').addEventListener('click', () => $('q-form').classList.add('hidden'));
+  $('cancel-q').addEventListener('click', closeQForm);
+  function closeQForm() {
+    $('q-form').classList.add('hidden');
+    setHash('questions');
+    updateTitle();
+  }
   $('q-type').addEventListener('change', syncQType);
   $('q-multi').addEventListener('change', syncQType);
 
@@ -1277,6 +1332,7 @@
   }
 
   function openQForm(id) {
+    setHash(id ? 'question/' + id + '/edit' : 'questions/new');
     editingQ = id;
     const q = id ? questions.find(x => x.id === id) : { type: 'single', stem: '', code: '', options: [], answer: [], explanation: '', points: 1, multi_mode: 'all', tags: '' };
     $('q-form-title').textContent = id ? '編輯題目 #' + id : '新增題目';
@@ -1315,7 +1371,7 @@
     try {
       if (editingQ) await call('PUT', '/api/admin/questions/' + editingQ, body);
       else await call('POST', '/api/admin/questions', body);
-      $('q-form').classList.add('hidden');
+      closeQForm();
       say('q-msg', editingQ ? '已更新，考過這題的分數已重新計算' : '已新增', true);
       loadQuestions();
     } catch (err) {
