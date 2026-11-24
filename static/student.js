@@ -499,10 +499,19 @@
     $('timer-box').classList.toggle('low', low);
     $('m-timer').classList.toggle('low', low);
     countDwell();
+    pollFocus();
     if (left <= 0) {
       clearInterval(timerId);
       finishExam(true);
     }
+  }
+
+  // 保險：每秒確認考試視窗仍在最前面。macOS 三指滑動切換桌面等情況，系統偶爾不會送出 blur 事件
+  function pollFocus() {
+    if (!current || current.finishing) return;
+    const out = document.hidden || !document.hasFocus();
+    if (out && !away) goAway('window');
+    else if (!out && away) comeBack();
   }
 
   // 每秒記一次：作答畫面在前景時，算在畫面中央那一題；每 15 秒回報一次
