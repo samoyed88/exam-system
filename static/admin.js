@@ -194,6 +194,7 @@
         '<td class="nowrap">' + [e.shuffle_q ? '題目' : '', e.shuffle_opt ? '選項' : ''].filter(Boolean).join('、') + '</td>' +
         '<td>' + e.attempt_count + '</td>' +
         '<td class="row"><button class="btn sm" data-monitor="' + e.id + '">監控／成績</button>' +
+        '<a class="btn ghost sm" href="/?preview=' + e.id + '" target="_blank" rel="noopener" title="用學生畫面試考，不會留下紀錄">模擬作答</a>' +
         '<button class="btn ghost sm" data-edit="' + e.id + '">編輯</button>' +
         '<button class="btn danger sm" data-del="' + e.id + '">刪除</button></td></tr>').join('');
     if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="9" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
@@ -375,6 +376,7 @@
 
   function openMonitor(id) {
     monitorExam = id;
+    $('mon-preview').href = '/?preview=' + id;
     show('monitor');
     $('mon-csv').onclick = downloadCsv;
     refreshMonitor();

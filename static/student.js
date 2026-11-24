@@ -22,12 +22,17 @@
   let away = false;            // 目前是否離開考試畫面（切視窗、切分頁、離開全螢幕），避免重複計次
   let guardAction = null;      // 遮罩按鈕要做的事
   const TYPE_TEXT = { single: '單選題', multi: '多選題', fill: '填充題' };
+  // 管理員模擬作答：/?preview=考試編號，用後台登入取題與評分，不寫入任何作答紀錄
+  const previewExam = new URLSearchParams(location.search).get('preview');
+  const adminToken = previewExam ? store('exam_admin_token') : null;
+  let previewSeed = '';
   const PROMPT = { single: '請選擇一個答案：', multi: '可選擇多個答案：', fill: '請在空格中填入答案：' };
 
   function show(view) {
     ['login', 'list', 'take', 'summary', 'result'].forEach(v => $('view-' + v).classList.toggle('hidden', v !== view));
     const busy = view === 'take' || view === 'summary';
-    $('who').innerHTML = student ? '<span class="avatar">' + esc(student.name.slice(-2)) + '</span> ' +
+    $('who').innerHTML = previewExam ? '<span class="avatar">預覽</span> 管理員' :
+      student ? '<span class="avatar">' + esc(student.name.slice(-2)) + '</span> ' +
       esc(student.name) + '（' + esc(student.student_id) + '）' : '';
     $('logout').classList.toggle('hidden', !student || busy);
     $('chpw').classList.toggle('hidden', !student || busy);
@@ -69,6 +74,7 @@
   document.addEventListener('click', e => {
     if (e.target.closest('[data-to-list]')) {
       e.preventDefault();
+      if (previewExam) { location.href = '/admin#exam/' + previewExam; return; }
       if (!current) loadList();
     }
   });
@@ -288,7 +294,10 @@
 
   async function startExam(examId) {
     try {
-      const data = await call('POST', '/api/exams/' + examId + '/start', { device: store('exam_pc') || '' });
+      const data = previewExam
+        ? await api('GET', '/api/admin/exams/' + examId + '/preview', undefined, adminToken)
+        : await call('POST', '/api/exams/' + examId + '/start', { device: store('exam_pc') || '' });
+      if (data.preview) previewSeed = data.seed;
       current = data;
       current.exam_id = examId;
       current.deadline = Date.now() + data.remaining_seconds * 1000;
@@ -447,6 +456,7 @@
   }
 
   async function flush() {
+    if (previewExam) { queue.clear(); setSave('模擬作答：答案只留在這個畫面', 'ok'); return; }
     if (flushing || !current) return;
     flushing = true;
     try {
@@ -504,6 +514,7 @@
 
   function sendDwell(keepalive) {
     dwellTicks = 0;
+    if (previewExam) { dwell = {}; return; }
     if (!current || !Object.keys(dwell).length) return;
     const seconds = dwell;
     dwell = {};
@@ -565,6 +576,17 @@
     }
     await sendDwell();  // 交卷後伺服器就不再收停留時間，要先送完
     const attemptId = current.attempt_id;
+    if (previewExam) {
+      try {
+        const result = await api('POST', '/api/admin/exams/' + previewExam + '/preview/submit',
+          { seed: previewSeed, responses: current.answers }, adminToken);
+        current = null;
+        leaveGuard();
+        renderResult(result, timeUp);
+        $('preview-note').textContent = result.student_view;
+      } catch (err) { setSave(err.message, 'ng'); current.finishing = false; }
+      return;
+    }
     for (let i = 0; i < 10; i++) {
       try {
         const result = await call('POST', '/api/attempts/' + attemptId + '/submit');
@@ -638,6 +660,10 @@
   }
 
   async function checkUnlock() {
+    if (previewExam) {  // 模擬作答沒有老師可以解鎖，直接解除並重新計次
+      Object.assign(current.guard, { locked: false, switches: 0 });
+      return applyGuard();
+    }
     try {
       const data = await call('POST', '/api/exams/' + current.exam_id + '/start', { device: store('exam_pc') || '' });
       current.guard = data.guard;
@@ -656,7 +682,7 @@
   function goAway(reason) {
     if (away || !guarding()) return;
     away = true;
-    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'blur', reason }).then(r => {
+    (previewExam ? Promise.resolve(previewBlur()) : call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'blur', reason })).then(r => {
       if (!current) return;
       if (r.submitted) { onViolationSubmit(); return; }
       Object.assign(current.guard, { switches: r.switches, total: r.total, locked: r.locked });
@@ -670,7 +696,7 @@
     if (!away || !current) return;
     if (needFullscreen()) return;  // 要求全螢幕時，重新進入全螢幕才算回來
     away = false;
-    call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'focus' }).catch(() => {});
+    if (!previewExam) call('POST', '/api/attempts/' + current.attempt_id + '/event', { type: 'focus' }).catch(() => {});
     afterReturn();
   }
 
@@ -695,7 +721,19 @@
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   }
 
+  // 模擬作答的離開畫面：照考試設定在瀏覽器裡計次，不送到伺服器
+  function previewBlur() {
+    const g = current.guard;
+    const switches = g.switches + 1, over = switches > g.limit;
+    return { switches, total: g.total + 1, locked: g.locked || (g.mode === 'lock' && over), submitted: g.mode === 'submit' && over };
+  }
+
   async function onViolationSubmit() {
+    if (previewExam) {
+      await ask('已自動交卷', '<p>離開考試畫面超過允許次數，正式考試會在這時候直接交卷。</p>', '查看結果', null);
+      current.finishing = false;
+      return finishExam(false);
+    }
     const attemptId = current.attempt_id;
     current.finishing = true;
     clearInterval(timerId);
@@ -723,7 +761,7 @@
   // 關分頁、切 App 時把還沒送出的作答用 keepalive 送出，瀏覽器關掉也會送完
   window.addEventListener('pagehide', () => {
     if (current) sendDwell(true);
-    if (!current || !queue.size) return;
+    if (!current || !queue.size || previewExam) return;
     queue.forEach((resp, qid) => {
       fetch('/api/attempts/' + current.attempt_id + '/answers', {
         method: 'PUT', keepalive: true,
@@ -813,5 +851,36 @@
       '<div class="card"><button class="btn ghost block" data-to-list>回到我的考試</button></div>';
   }
 
-  if (token && student) loadList(); else show('login');
+  // 模擬作答：顯示提示列，跳過學號登入，直接進到開始作答的確認畫面
+  async function startPreview() {
+    document.body.insertAdjacentHTML('afterbegin', '<div class="preview-bar"><b>管理員模擬作答</b>' +
+      '<span id="preview-note">作答與成績都不會被記錄，學生端與監控頁看不到。</span>' +
+      '<a href="?preview=' + encodeURIComponent(previewExam) + '">重新開始</a><a href="/admin#exam/' + encodeURIComponent(previewExam) + '">回到後台</a></div>');
+    $('who').innerHTML = '<span class="avatar">預覽</span> 管理員';
+    if (!adminToken) {
+      show('list');
+      $('list-msg').textContent = '請先在這個瀏覽器登入後台，再從後台開啟模擬作答。';
+      return;
+    }
+    try {
+      const p = await api('GET', '/api/admin/exams/' + previewExam + '/preview', undefined, adminToken);
+      show('list');
+      $('exam-list').innerHTML = '';
+      const ex = p.exam;
+      const ok = await ask('開始模擬作答',
+        '<table class="info-table"><tr><th>考試</th><td>' + esc(ex.title) + '</td></tr>' +
+        '<tr><th>題數</th><td>' + ex.question_count + ' 題</td></tr>' +
+        '<tr><th>作答時間限制</th><td>' + ex.duration_min + ' 分鐘</td></tr></table>' + guardRules(ex) +
+        '<p style="margin-top:.75rem">這是學生按下「開始作答」後看到的畫面。計時、打散、防切換規則都和正式考試相同，但不會留下任何紀錄。</p>',
+        '開始作答', '取消');
+      if (!ok) { location.href = '/admin#exam/' + previewExam; return; }
+      startExam(+previewExam);
+    } catch (err) {
+      show('list');
+      $('list-msg').textContent = err.status === 401 ? '後台登入已過期，請重新登入後台。' : err.message;
+    }
+  }
+
+  if (previewExam) startPreview();
+  else if (token && student) loadList(); else show('login');
 })();

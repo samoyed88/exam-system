@@ -270,6 +270,11 @@ tr.flagged td { background: #fbefe9; }
 .save-state.ok::before { content: '✓ '; color: var(--ok); }
 .mobile-bar, .mobile-nav { display: none; }
 
+/* 管理員模擬作答提示列 */
+.preview-bar { background: var(--warn-soft); border-bottom: 2px solid var(--warn); color: var(--warn); padding: .45rem 1.25rem; font-size: .88rem; display: flex; gap: .4rem 1rem; flex-wrap: wrap; align-items: center; }
+.preview-bar a { color: var(--warn); font-weight: 700; }
+.preview-bar #preview-note { flex: 1; color: var(--text); }
+
 /* 離開考試畫面：警告、鎖定、全螢幕提示 */
 .guard { position: fixed; inset: 0; z-index: 400; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 1rem; }
 .guard-box { max-width: 480px; width: 100%; text-align: center; background: var(--surface); border: 1px solid var(--border); border-top: 4px solid var(--rule); border-radius: var(--radius); padding: 1.75rem 1.5rem; }

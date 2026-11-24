@@ -25,6 +25,7 @@ ACTIONS = {
     "force_submit": "替學生強制交卷", "reset_attempt": "刪除作答（讓學生重考）", "unlock_attempt": "解鎖作答",
     "create_admin": "新增管理員", "update_admin": "修改管理員", "reset_admin_password": "重設管理員密碼",
     "delete_admin": "刪除管理員", "change_my_password": "修改自己的密碼",
+    "preview_submit": "模擬作答交卷",
     "results_csv": "下載成績 CSV", "exam_items_csv": "下載試題分析 CSV", "export_grades_xlsx": "匯出成績 Excel",
 }
 

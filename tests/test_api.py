@@ -1131,3 +1131,31 @@ def test_admin_accounts(client):
     assert client.delete("/api/admin/admins/15130000", headers=h).status_code == 200
     # 共用密碼不能透過網頁改
     assert client.post("/api/admin/me/password", json={"old_password": "teacher", "new_password": "whatever123"}, headers=h).status_code == 400
+
+
+# ── 模擬作答 ──
+
+def test_admin_preview_does_not_write(client):
+    h, exam_id = setup_exam(client, shuffle_opt=True)
+    p = client.get(f"/api/admin/exams/{exam_id}/preview", headers=h).json()
+    assert p["preview"] and len(p["questions"]) == 3 and all("answer" not in q for q in p["questions"])
+    qs = {q["id"]: q for q in client.get("/api/admin/questions", headers=h).json()}
+    responses = {}
+    for q in p["questions"]:
+        key = qs[q["id"]]
+        responses[q["id"]] = (key["answer"][0] if key["type"] == "single" else
+                              key["answer"] if key["type"] == "multi" else [alts[0] for alts in key["answer"]])
+    r = client.post(f"/api/admin/exams/{exam_id}/preview/submit", json={"seed": p["seed"], "responses": responses}, headers=h).json()
+    assert r["score"] == r["max_score"] and all("explanation" in q for q in r["questions"])
+    # 交卷後檢視的選項順序與作答時一致：正確答案的字母位置對得上
+    single = next(q for q in p["questions"] if q["type"] == "single")
+    shown = next(q for q in r["questions"] if q["type"] == "single")
+    assert [o["text"] for o in single["options"]] == shown["options"]
+    from app.db import connect
+    conn = connect()
+    assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
+    conn.close()
+    assert client.post(f"/api/admin/exams/{exam_id}/preview/submit", json={"seed": "x", "responses": {}}, headers=h).status_code == 400
+    s = student_headers(client, "11201")
+    assert client.get(f"/api/admin/exams/{exam_id}/preview", headers=s).status_code == 401

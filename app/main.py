@@ -476,8 +476,8 @@ def option_order(exam: sqlite3.Row, sid: str, q: sqlite3.Row) -> list[int]:
     return order
 
 
-def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
-    sid = attempt["student_id"]
+def question_view(db, exam: sqlite3.Row, sid: str) -> list[dict]:
+    """學生作答畫面的題目（不含答案），題目與選項依學號打散。"""
     out = []
     for q in student_questions(db, exam, sid):
         texts = json.loads(q["options"])
@@ -487,6 +487,12 @@ def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
         if q["type"] == "fill":
             item["blanks"] = len(json.loads(q["answer"]))
         out.append(item)
+    return out
+
+
+def attempt_payload(db, exam: sqlite3.Row, attempt: sqlite3.Row) -> dict:
+    sid = attempt["student_id"]
+    out = question_view(db, exam, sid)
     saved = {r["question_id"]: json.loads(r["response"]) for r in db.execute(
         "SELECT question_id, response FROM answers WHERE attempt_id = ?", (attempt["id"],))}
     remaining = (datetime.fromisoformat(attempt["deadline"]) - now()).total_seconds()
@@ -699,14 +705,20 @@ def result_payload(db, attempt: sqlite3.Row, just_submitted: bool = False) -> di
     if not just_submitted and not review_open(exam):
         out["review_closed"] = True
         return out
-    saved = {r["question_id"]: r for r in db.execute(
+    saved = {r["question_id"]: (json.loads(r["response"]), r["score"]) for r in db.execute(
         "SELECT * FROM answers WHERE attempt_id = ?", (attempt["id"],))}
-    sid = attempt["student_id"]
-    # 用作答時同樣的題目與選項順序呈現，字母才對得上學生當時看到的
+    out["questions"] = review_items(db, exam, attempt["student_id"], saved, exam["show_mode"] == "explain")
+    return out
+
+
+def review_items(db, exam: sqlite3.Row, sid: str, saved: dict, explain: bool) -> list[dict]:
+    """交卷後檢視的每題內容；saved：題目 id → (作答, 得分)。
+    用作答時同樣的題目與選項順序呈現，字母才對得上學生當時看到的。"""
+    items = []
     for q in student_questions(db, exam, sid):
         a = saved.get(q["id"])
         answer = json.loads(q["answer"])
-        response = json.loads(a["response"]) if a else None
+        response = a[0] if a else None
         texts = json.loads(q["options"])
         if q["type"] != "fill":
             order = option_order(exam, sid, q)
@@ -719,12 +731,12 @@ def result_payload(db, attempt: sqlite3.Row, just_submitted: bool = False) -> di
                 response = sorted(pos[i] for i in response if i in pos)
         item = {"stem": q["stem"], "code": q["code"], "type": q["type"],
                 "options": texts, "answer": answer, "response": response,
-                "score": a["score"] if a and a["score"] is not None else 0,
+                "score": a[1] if a and a[1] is not None else 0,
                 "points": q["points"]}
-        if exam["show_mode"] == "explain":
+        if explain:
             item["explanation"] = q["explanation"]
-        out["questions"].append(item)
-    return out
+        items.append(item)
+    return items
 
 
 @app.post("/api/attempts/{attempt_id}/submit")
@@ -1990,6 +2002,64 @@ def compare_students(exam_id: int, a: str, b: str, db=Depends(get_db)):
             side.pop("norm")
         out.append(item)
     return {"a": person(rows[a]), "b": person(rows[b]), "questions": out}
+
+
+# ── 模擬作答（管理員用學生畫面試考，不寫入資料庫）──
+
+
+class PreviewSubmitIn(BaseModel):
+    seed: str
+    responses: dict[int, object] = {}
+
+
+def preview_sid(seed: str) -> str:
+    # 打散順序依這個假學號決定；出題與評分用同一個 seed，選項字母才對得上
+    if not re.fullmatch(r"[0-9a-f]{8,32}", seed):
+        raise HTTPException(400, "預覽代號不正確")
+    return f"preview:{seed}"
+
+
+@app.get("/api/admin/exams/{exam_id}/preview", dependencies=[admin])
+def preview_exam(exam_id: int, db=Depends(get_db)):
+    """學生作答畫面需要的資料；每次開啟都是新的打散順序，不建立作答紀錄。"""
+    exam = exam_or_404(db, exam_id)
+    seed = os.urandom(8).hex()
+    end = parse_time(exam["end_at"])
+    return {"attempt_id": 0, "preview": True, "seed": seed, "title": exam["title"],
+            "remaining_seconds": exam["duration_min"] * 60, "questions": question_view(db, exam, preview_sid(seed)),
+            "saved": {}, "guard": {"mode": exam["focus_mode"], "limit": exam["focus_limit"],
+                                   "fullscreen": bool(exam["fullscreen"]), "block_copy": bool(exam["block_copy"]),
+                                   "switches": 0, "total": 0, "locked": False},
+            "exam": {"title": exam["title"], "duration_min": exam["duration_min"],
+                     "question_count": len(exam_questions(db, exam_id)), "end_at": end.isoformat() if end else "",
+                     "focus_mode": exam["focus_mode"], "focus_limit": exam["focus_limit"],
+                     "fullscreen": bool(exam["fullscreen"]), "block_copy": bool(exam["block_copy"])}}
+
+
+@app.post("/api/admin/exams/{exam_id}/preview/submit", dependencies=[admin])
+def preview_submit(exam_id: int, body: PreviewSubmitIn, db=Depends(get_db)):
+    """模擬交卷：照正式規則評分並回傳交卷後的檢視（一律附正確答案與解析），不寫入資料庫。"""
+    exam = exam_or_404(db, exam_id)
+    sid = preview_sid(body.seed)
+    saved, total, max_total = {}, 0.0, 0.0
+    for q in exam_questions(db, exam_id):
+        max_total += q["points"]
+        resp = body.responses.get(q["id"])
+        if resp is None or not valid_response(q, resp):
+            continue
+        if q["type"] == "multi":
+            resp = sorted(set(resp))
+        score = score_answer(q, resp)
+        saved[q["id"]] = (resp, score)
+        total += score
+    show = {"score": "只有總分", "answers": "總分＋每題對錯與正確答案", "explain": "總分＋對錯、正確答案與解析"}[exam["show_mode"]]
+    release = release_time(exam)
+    when = "交卷後立即" if release is None else f"{release.astimezone(TZ):%m/%d %H:%M} 公布"
+    audit.note(f"「{exam['title']}」得分 {round(total, 2):g} / {round(max_total, 2):g}", target=f"考試 #{exam_id}")
+    return {"title": exam["title"], "score": round(total, 2), "max_score": round(max_total, 2),
+            "show_mode": "explain", "started_at": "", "submitted_at": now().isoformat(), "preview": True,
+            "student_view": f"學生實際看到：{show}（{when}）。預覽一律顯示正確答案與解析。",
+            "questions": review_items(db, exam, sid, saved, True)}
 
 
 # ── 試題分析、成績總表、匯出 ──
