@@ -5,9 +5,22 @@ from fractions import Fraction
 
 
 def normalize(text: str, fold: bool = True) -> str:
-    # NFKC 會把全形英數、全形空白轉半形；再把連續空白壓成一個，fold 時轉小寫
+    # NFKC 會把全形英數、全形空白轉半形；連續空白壓成一個，fold 時轉小寫。
+    # 符號旁邊的空白不影響程式碼的意思（students[0] = 5 和 students[0]=5 相同），一律去掉；
+    # 兩個英數字之間的空白要保留（double students 不能變成 doublestudents）
     text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(text)).strip())
+    text = re.sub(r"(?<=[^\w\s])\s+|\s+(?=[^\w\s])", "", text)
     return text.casefold() if fold else text
+
+
+def statement_blanks(code: str, count: int) -> list[bool]:
+    """程式碼裡哪些空格是「獨立一行、後面接分號」的敘述（例如「   【3】 ; //設定…」）。
+    這種空格學生多打一個分號，放回去變成 ;; 仍能編譯，可以算對；for(…)、println(…) 裡的空格不行。"""
+    return [bool(re.search(rf"^\s*【{k}】\s*;", code or "", re.M)) for k in range(1, count + 1)]
+
+
+def strip_statement_semicolon(response: str) -> str:
+    return re.sub(r"[\s;]+$", "", response) if response.rstrip().endswith(";") else response
 
 
 # 只認一般小數與分數。Fraction 也吃 1e999999999 這種指數寫法，展開要算好幾小時，
@@ -42,7 +55,7 @@ def fill_match(response: str, accepted: list[str], case_sensitive: bool = False)
 
 def grade(qtype: str, answer, response, points: float,
           multi_mode: str = "all", num_options: int = 0, weights: list[float] | None = None,
-          case_sensitive: bool = False) -> float:
+          case_sensitive: bool = False, statement: list[bool] | None = None) -> float:
     """回傳這題得分；response 為 None 代表沒作答。"""
     if response is None:
         return 0.0
@@ -67,9 +80,12 @@ def grade(qtype: str, answer, response, points: float,
         if not isinstance(response, list) or not answer:
             return 0.0
         per_blank = points / len(answer)
+        statement = statement or []
         hits = sum(
             1 for i, accepted in enumerate(answer)
-            if i < len(response) and fill_match(response[i], accepted, case_sensitive)
+            if i < len(response) and fill_match(
+                strip_statement_semicolon(response[i]) if i < len(statement) and statement[i] else response[i],
+                accepted, case_sensitive)
         )
         return round(per_blank * hits, 4)
     return 0.0

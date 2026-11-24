@@ -28,7 +28,7 @@ from .auth import (
     verify_password,
 )
 from .db import connect, get_db, init_db
-from .grading import fill_match, grade
+from .grading import fill_match, grade, statement_blanks, strip_statement_semicolon
 from . import audit
 from .analysis import flags as item_flags
 from .analysis import item_analysis, item_name, random_guess
@@ -211,7 +211,18 @@ def exam_questions(db, exam_id: int) -> list[sqlite3.Row]:
 def score_answer(q: sqlite3.Row, response) -> float:
     return grade(q["type"], json.loads(q["answer"]), response, q["points"],
                  q["multi_mode"], len(json.loads(q["options"])),
-                 json.loads(q["weights"]) if q["weights"] else None, bool(q["case_sensitive"]))
+                 json.loads(q["weights"]) if q["weights"] else None, bool(q["case_sensitive"]),
+                 statement_blanks(q["code"], len(json.loads(q["answer"]))) if q["type"] == "fill" else None)
+
+
+def blank_ok(q: sqlite3.Row, i: int, text: str) -> bool:
+    """填充題第 i 格的寫法算不算對，規則與評分相同（顯示與統計用）。"""
+    key = json.loads(q["answer"])
+    if i >= len(key):
+        return False
+    if statement_blanks(q["code"], len(key))[i]:
+        text = strip_statement_semicolon(text)
+    return fill_match(text, key[i], bool(q["case_sensitive"]))
 
 
 def log_event(db, attempt_id: int, kind: str, question_id: int | None = None,
@@ -1538,7 +1549,7 @@ def exam_stats(exam_id: int, db=Depends(get_db)):
                     text = resp[i].strip() if i < len(resp) else ""
                     variants[i][text] = variants[i].get(text, 0) + 1
             item["fill_variants"] = [
-                sorted(({"text": t, "count": c, "accepted": fill_match(t, answer[i], bool(q["case_sensitive"]))}
+                sorted(({"text": t, "count": c, "accepted": blank_ok(q, i, t)}
                         for t, c in v.items()), key=lambda x: -x["count"])
                 for i, v in enumerate(variants)]
         else:
@@ -1946,7 +1957,7 @@ def exam_gradebook(exam_id: int, db=Depends(get_db)):
                 key = json.loads(q["answer"])
                 got = resp if isinstance(resp, list) else []
                 cell["blanks"] = [{"text": got[i] if i < len(got) else "",
-                                   "ok": i < len(got) and fill_match(got[i], key[i], bool(q["case_sensitive"]))}
+                                   "ok": i < len(got) and blank_ok(q, i, got[i])}
                                   for i in range(len(key))]
             cells.append(cell)
         rows.append({"attempt_id": a["id"], "student_id": a["student_id"], "name": a["name"] or "",
