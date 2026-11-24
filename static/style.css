@@ -469,6 +469,22 @@ th.sortable:hover { color: var(--brand); }
 th.sortable .arrow { font-size: .7rem; color: var(--brand); }
 th.sorted { color: var(--brand); }
 
+/* 作答紀錄：每題一張卡片 */
+.at-questions { display: grid; gap: .75rem; }
+.aq { border: 1px solid var(--border); border-radius: var(--radius); padding: .75rem 1rem; background: #fff; }
+.aq-head { display: flex; gap: .4rem .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .4rem; }
+.aq-score { font-family: var(--mono); }
+.aq-meta { margin-left: auto; font-size: .8rem; }
+.aq-stem { white-space: pre-wrap; margin-bottom: .4rem; }
+.aq details { margin-bottom: .4rem; }
+.aq details summary { cursor: pointer; font-size: .85rem; }
+.aq-ans { display: grid; gap: .25rem; font-size: .92rem; }
+.aq-label { display: inline-block; min-width: 4.5rem; font-size: .78rem; color: var(--text-muted); }
+.aq-key { color: var(--ok); }
+.blank-line .blank-key { margin-left: auto; font-size: .78rem; color: var(--ok); white-space: normal; }
+.summary > div.small b { font-size: 1rem; white-space: pre-line; overflow-wrap: anywhere; }
+.summary b { overflow-wrap: anywhere; }
+
 /* 自動更新狀態 */
 .live { font-size: .8rem; font-family: var(--mono); }
 .live.ng { color: var(--ng); font-family: inherit; }

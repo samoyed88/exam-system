@@ -1852,15 +1852,24 @@ def attempt_log(attempt_id: int, db=Depends(get_db)):
     for q in qs:
         a = saved.get(q["id"])
         answer = json.loads(q["answer"])
+        resp = json.loads(a["response"]) if a else None
         questions.append({
             "no": number[q["id"]], "id": q["id"], "type": q["type"], "stem": q["stem"],
             "points": q["points"], "seconds": round(times.get(q["id"], 0)),
             "avg_seconds": round(class_avg[q["id"]]) if q["id"] in class_avg else None,
             "saves": saves.get(q["id"], 0),
-            "response": response_text(q, json.loads(a["response"])) if a else "",
+            "response": response_text(q, resp),
             "answer": " / ".join(b[0] for b in answer) if q["type"] == "fill"
             else response_text(q, answer),
-            "score": a["score"] if a else None})
+            "score": a["score"] if a else None,
+            # 一題一題顯示用：程式碼、選擇題附選項文字、填充題每一格的寫法與對錯
+            "code": q["code"],
+            "response_detail": response_detail(q, resp),
+            "answer_detail": response_detail(q, answer) if q["type"] != "fill" else "",
+            "answer_blanks": answer if q["type"] == "fill" else [],
+            "blanks": [{"text": resp[i] if isinstance(resp, list) and i < len(resp) else "",
+                        "ok": isinstance(resp, list) and i < len(resp) and blank_ok(q, i, resp[i])}
+                       for i in range(len(answer))] if q["type"] == "fill" else []})
     return {"exam": {"id": exam["id"], "title": exam["title"],
                      "duration_min": exam["duration_min"]},
             "student": {"student_id": attempt["student_id"],

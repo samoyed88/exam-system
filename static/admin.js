@@ -38,7 +38,7 @@
 
   async function loadMe() {
     try { me = await api('GET', '/api/admin/me', undefined, token); } catch (err) { me = null; }
-    $('whoami').textContent = me ? (me.name ? me.name + '（' + me.account + '）' : me.account) + (me.role === 'owner' ? '・最高管理員' : '') : '';
+    $('whoami').textContent = me ? (me.name ? me.name + '（' + me.account + '）' : me.account) : '';
     $('whoami').classList.toggle('hidden', !me);
     $('my-pw').classList.toggle('hidden', !me);
     // 「管理員」分頁只有最高管理員看得到
@@ -864,18 +864,32 @@
       [changes, '改答次數'],
       [a.tab_switches, '離開畫面次數'],
       [ended ? EVENT_TEXT[ended.kind][0] : '尚未交卷', '交卷方式'],
-      [(a.device || '-') + '　' + (a.ip || ''), '電腦　IP'],
-    ].map(([v, t]) => '<div><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+      [(a.device || '—') + '\n' + (a.ip || '—'), '電腦／IP', 'small'],
+    ].map(([v, t, cls]) => '<div' + (cls ? ' class="' + cls + '"' : '') + '><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
     renderDwellChart(qs);
     const verdict = q => !q.response ? '<span class="badge gray">未作答</span>' : q.score >= q.points ? '<span class="badge ok">對</span>' :
       q.score > 0 ? '<span class="badge warn">部分</span>' : '<span class="badge ng">錯</span>';
-    $('at-table').innerHTML = '<tr><th>題號</th><th>題型</th><th>題目</th><th>停留</th><th>全班平均</th><th>作答次數</th><th>最後答案</th><th>正解</th><th>得分</th></tr>' +
-      qs.map(q => '<tr><td>' + q.no + '</td><td>' + TYPE_TEXT[q.type] + '</td>' +
-        '<td title="' + esc(q.stem) + '">' + esc(q.stem.length > 28 ? q.stem.slice(0, 28) + '…' : q.stem) + '</td>' +
-        '<td>' + fmtSec(q.seconds) + '</td><td class="muted">' + fmtSec(q.avg_seconds) + '</td>' +
-        '<td>' + (q.saves > 1 ? '<b style="color:var(--warn)">' + q.saves + '</b>' : q.saves || '') + '</td>' +
-        '<td>' + esc(q.response) + '</td><td class="muted">' + esc(q.answer) + '</td>' +
-        '<td>' + verdict(q) + ' ' + (q.score != null ? fmtNum(q.score) : '') + '</td></tr>').join('');
+    // 一題一題往下排：答案再長也只換行，不用左右捲動
+    const open = new Set([...document.querySelectorAll('#at-questions details[open]')].map(el => el.dataset.q));
+    $('at-questions').innerHTML = qs.map(q => {
+      let answer;
+      if (q.type === 'fill') {
+        answer = '<div class="blank-cell">' + q.blanks.map((b, k) => '<div class="blank-line ' + (b.ok ? 'ok' : 'ng') + '">' +
+          (q.blanks.length > 1 ? '<span class="blank-no">' + (k + 1) + '</span>' : '') + (b.ok ? '✓ ' : '✗ ') +
+          (b.text ? '<span class="blank-text">' + esc(b.text) + '</span>' : '<span class="muted">（空白）</span>') +
+          (b.ok ? '' : '<span class="blank-key">正解 ' + q.answer_blanks[k].map(esc).join(' 或 ') + '</span>') + '</div>').join('') + '</div>';
+      } else {
+        answer = '<div class="aq-ans"><div><span class="aq-label">學生答案</span>' + (q.response_detail ? esc(q.response_detail) : '<span class="muted">未作答</span>') + '</div>' +
+          '<div><span class="aq-label">正確答案</span><span class="aq-key">' + esc(q.answer_detail) + '</span></div></div>';
+      }
+      return '<div class="aq"><div class="aq-head"><span class="q-num">第 ' + q.no + ' 題</span><span class="badge">' + TYPE_TEXT[q.type] + '</span>' + verdict(q) +
+        '<b class="aq-score">' + (q.score != null ? fmtNum(q.score) : 0) + ' / ' + fmtNum(q.points) + ' 分</b>' +
+        '<span class="muted aq-meta">停留 ' + fmtSec(q.seconds) + '（全班平均 ' + fmtSec(q.avg_seconds) + '）・作答 ' +
+        (q.saves > 1 ? '<b style="color:var(--warn)">' + q.saves + ' 次</b>' : (q.saves || 0) + ' 次') + '</span></div>' +
+        '<div class="aq-stem">' + esc(q.stem) + '</div>' +
+        (q.code ? '<details data-q="' + q.id + '"' + (open.has(String(q.id)) ? ' open' : '') + '><summary class="muted">程式碼</summary><pre>' + esc(q.code) + '</pre></details>' : '') +
+        answer + '</div>';
+    }).join('');
     const t0 = new Date(a.started_at);
     $('at-timeline').innerHTML = '<tr><th style="width:90px">時間</th><th style="width:90px">經過</th><th>事件</th></tr>' +
       d.timeline.map(e => {
