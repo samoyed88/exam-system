@@ -874,6 +874,12 @@ def admin_account_login(account: str, password: str, ip_key: str) -> dict:
 # ── 管理員帳號 ──
 
 ADMIN_DEFAULT_PASSWORD = os.getenv("ADMIN_DEFAULT_PASSWORD", "")
+# 老師指定不受「至少 8 個字元」限制的帳號（逗號分隔），例如 ADMIN_SHORT_PASSWORD_ACCOUNTS=08130000
+SHORT_PASSWORD_ACCOUNTS = {a.strip() for a in os.getenv("ADMIN_SHORT_PASSWORD_ACCOUNTS", "").split(",") if a.strip()}
+
+
+def password_min_length(account: str) -> int:
+    return 1 if account in SHORT_PASSWORD_ACCOUNTS else 8
 
 
 ROLES = {"owner": "最高管理員", "admin": "一般管理員"}
@@ -916,7 +922,7 @@ def public_admin(r: sqlite3.Row) -> dict:
 
 @app.get("/api/admin/me")
 def admin_me(me=Depends(require_admin_self)):
-    return me
+    return {**me, "password_min": password_min_length(me["account"])}
 
 
 @app.post("/api/admin/me/password")
@@ -926,8 +932,9 @@ def change_my_password(body: AdminPasswordIn, me=Depends(require_admin_self), db
         audit.note("舊密碼錯誤")
         raise HTTPException(400, "舊密碼不正確")
     new = body.new_password
-    if len(new) < 8:
-        raise HTTPException(400, "新密碼至少 8 個字元")
+    minimum = password_min_length(me["account"])
+    if len(new.strip()) < minimum:
+        raise HTTPException(400, f"新密碼至少 {minimum} 個字元" if minimum > 1 else "新密碼不能空白")
     if new == ADMIN_DEFAULT_PASSWORD or new == me["account"] or new == body.old_password:
         raise HTTPException(400, "新密碼不能是預設密碼、帳號或舊密碼")
     pw_hash = hash_password(new)

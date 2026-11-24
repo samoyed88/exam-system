@@ -1191,3 +1191,18 @@ def test_admin_preview_does_not_write(client):
     assert client.post(f"/api/admin/exams/{exam_id}/preview/submit", json={"seed": "x", "responses": {}}, headers=h).status_code == 400
     s = student_headers(client, "11201")
     assert client.get(f"/api/admin/exams/{exam_id}/preview", headers=s).status_code == 401
+
+
+def test_short_password_exception(client, monkeypatch):
+    from app import main
+    monkeypatch.setattr(main, "SHORT_PASSWORD_ACCOUNTS", {"08130000"})
+    h = admin_headers(client)
+    for acct in ("08130000", "15130001"):
+        client.post("/api/admin/admins", json={"account": acct}, headers=h)
+    for acct, ok in (("08130000", 200), ("15130001", 400)):
+        t = {"Authorization": "Bearer " + admin_login_as(client, acct, "mcujava11501").json()["token"]}
+        assert client.get("/api/admin/me", headers=t).json()["password_min"] == (1 if ok == 200 else 8)
+        r = client.post("/api/admin/me/password", json={"old_password": "mcujava11501", "new_password": "1234"}, headers=t)
+        assert r.status_code == ok
+    t = {"Authorization": "Bearer " + admin_login_as(client, "08130000", "1234").json()["token"]}
+    assert client.get("/api/admin/exams", headers=t).status_code == 200

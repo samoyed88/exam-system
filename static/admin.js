@@ -53,7 +53,7 @@
       const ok = await ask(forced ? '請先修改預設密碼' : '修改密碼',
         (forced ? '<p>這個帳號還在使用預設密碼，改完之後才能使用後台。</p>' : '') +
         '<label>目前的密碼</label><input type="password" id="cp-old" autocomplete="current-password">' +
-        '<label>新密碼（至少 8 個字元）</label><input type="password" id="cp-new" autocomplete="new-password">' +
+        '<label>新密碼' + (me && me.password_min > 1 ? '（至少 ' + me.password_min + ' 個字元）' : '') + '</label><input type="password" id="cp-new" autocomplete="new-password">' +
         '<label>再輸入一次新密碼</label><input type="password" id="cp-again" autocomplete="new-password">' +
         (error ? '<div class="msg ng">' + esc(error) + '</div>' : ''), '修改密碼', forced ? '登出' : '取消');
       if (!ok) { if (forced) logout(); return false; }
