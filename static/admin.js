@@ -471,6 +471,49 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // ── 可排序的表格：點欄位標題排序，再點一次反過來；沒有值的一律排在最後 ──
+
+  const collator = new Intl.Collator('zh-Hant', { numeric: true });
+
+  function sortRows(rows, state, columns) {
+    const col = columns[state.key];
+    if (!col) return rows;
+    const get = col.value;
+    return rows.slice().sort((a, b) => {
+      const x = get(a), y = get(b);
+      const xe = x == null || x === '', ye = y == null || y === '';
+      if (xe || ye) return xe === ye ? 0 : xe ? 1 : -1;
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : collator.compare(String(x), String(y));
+      return c * state.dir;
+    });
+  }
+
+  function sortHead(key, label, state, cls) {
+    const arrow = state.key === key ? (state.dir > 0 ? ' ▲' : ' ▼') : '';
+    return '<th class="sortable' + (cls ? ' ' + cls : '') + (arrow ? ' sorted' : '') + '" data-sort="' + key + '" title="點一下排序">' + label + '<span class="arrow">' + arrow + '</span></th>';
+  }
+
+  function toggleSort(state, key) {
+    if (state.key === key) state.dir = -state.dir;
+    else Object.assign(state, { key, dir: 1 });
+  }
+
+  const monSort = { key: 'student_id', dir: 1 };
+  const STATUS_ORDER = { in_progress: 0, submitted: 1, absent: 2 };
+  const MON_COLUMNS = {
+    student_id: { label: '學號', value: r => r.student_id },
+    name: { label: '姓名', value: r => r.name },
+    status: { label: '狀態', value: r => r.locked ? -1 : STATUS_ORDER[r.status] },
+    answered: { label: '進度', value: r => r.status === 'absent' ? null : r.answered },
+    seconds: { label: '用時', value: r => r.attempt_id ? r.seconds : null },
+    score: { label: '得分', value: r => r.score },
+    ip: { label: 'IP', value: r => r.ip },
+    device: { label: '電腦', value: r => r.device },
+    tab_switches: { label: '切換視窗', value: r => r.attempt_id ? r.tab_switches : null },
+    flags: { label: '注意', value: r => r.flags.length || null },
+  };
+  let monData = null;
+
   async function refreshMonitor() {
     let data;
     try { data = await call('GET', '/api/admin/exams/' + monitorExam + '/monitor'); }
@@ -488,10 +531,16 @@
       '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
       (data.rows.some(r => r.locked) ? '<div><b style="color:var(--ng)">' + data.rows.filter(r => r.locked).length + '</b><span>已鎖定，等你解鎖</span></div>' : '') +
       '<div><b>' + avg + '</b><span>平均分</span></div>';
+    monData = data;
+    renderMonitorTable();
+  }
+
+  function renderMonitorTable() {
+    const data = monData;
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
     const locked = '<span class="badge ng">已鎖定</span>';
-    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>用時</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
-      data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
+    $('mon-table').innerHTML = '<tr>' + Object.entries(MON_COLUMNS).map(([k, c]) => sortHead(k, c.label, monSort)).join('') + '<th></th></tr>' +
+      sortRows(data.rows, monSort, MON_COLUMNS).map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
         '<td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
         '<td>' + (r.locked ? locked : status[r.status]) + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
         '<td>' + (r.attempt_id ? fmtSec(r.seconds) : '') + '</td>' +
@@ -510,6 +559,8 @@
   }
 
   $('mon-table').addEventListener('click', async e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(monSort, th.dataset.sort); return renderMonitorTable(); }
     const t = e.target;
     if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'monitor'); return; }
     if (t.dataset.unlock) {
@@ -967,6 +1018,8 @@
   // ── 成績總表 ──
 
   let grades = null;
+  const gradeSort = { key: 'student_id', dir: 1 };   // 總表：點欄位標題排序
+  const gqSort = { key: 'student_id', dir: 1 };      // 逐題檢視：點欄位標題排序
   let gq = 0;                  // 逐題檢視目前的題目（索引）
   const MARK = { right: '<span class="mark-right" title="答對">✓</span>', wrong: '<span class="mark-wrong" title="答錯">✗</span>',
     partial: '<span class="mark-partial" title="部分得分">◐</span>', blank: '<span class="mark-blank" title="未作答">－</span>' };
@@ -974,7 +1027,13 @@
   $('mon-grades').addEventListener('click', () => loadGrades());
   $('grades-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
   $('grades-mode').addEventListener('change', renderGrades);
-  $('grades-sort').addEventListener('change', renderGrades);
+  // 上方的排序選單同時設定兩種顯示的排序（欄位標題也可以直接點）
+  $('grades-sort').addEventListener('change', () => {
+    const v = $('grades-sort').value;
+    Object.assign(gradeSort, v === 'id' ? { key: 'student_id', dir: 1 } : { key: 'score', dir: v === 'high' ? -1 : 1 });
+    Object.assign(gqSort, v === 'id' ? { key: 'student_id', dir: 1 } : { key: 'score', dir: v === 'high' ? -1 : 1 });
+    renderGrades();
+  });
   $('grades-xlsx').addEventListener('click', () => download('/api/admin/exams/' + monitorExam + '/grades.xlsx',
     $('grades-title').textContent.replace('：成績總表', '') + '-成績.xlsx'));
 
@@ -1030,12 +1089,16 @@
     $('grades-sort').querySelector('[value=low]').textContent = perQuestion ? '本題得分低 → 高' : '成績低 → 高';
     if (perQuestion) return renderQuestionView();
     const g = grades;
-    const rows = g.rows.slice();
-    const sort = $('grades-sort').value;
-    if (sort === 'high') rows.sort((a, b) => b.score - a.score);
-    if (sort === 'low') rows.sort((a, b) => a.score - b.score);
-    const head = '<tr><th>姓名</th><th>學號</th><th>開始</th><th>完成</th><th>作答時間</th><th class="num">成績/' + fmtNum(g.max_score) + '</th>' +
-      g.questions.map(q => '<th class="num" title="' + esc(q.name) + '">Q' + q.no + '<br><span class="muted">/' + fmtNum(q.points) + '</span></th>').join('') + '</tr>';
+    const columns = {
+      name: { value: r => r.name }, student_id: { value: r => r.student_id }, started_at: { value: r => r.started_at },
+      submitted_at: { value: r => r.submitted_at }, seconds: { value: r => r.seconds }, score: { value: r => r.score },
+    };
+    g.questions.forEach((q, k) => { columns['q' + k] = { value: r => r.cells[k].score }; });
+    const rows = sortRows(g.rows, gradeSort, columns);
+    const head = '<tr>' + sortHead('name', '姓名', gradeSort) + sortHead('student_id', '學號', gradeSort) +
+      sortHead('started_at', '開始', gradeSort) + sortHead('submitted_at', '完成', gradeSort) + sortHead('seconds', '作答時間', gradeSort) +
+      sortHead('score', '成績/' + fmtNum(g.max_score), gradeSort, 'num') +
+      g.questions.map((q, k) => sortHead('q' + k, 'Q' + q.no + '<br><span class="muted">/' + fmtNum(q.points) + '</span>', gradeSort, 'num')).join('') + '</tr>';
     const body = rows.map(r => '<tr><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
       '<td>' + esc(r.student_id) + '</td><td>' + esc(fmtTime(r.started_at)) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td>' +
       '<td>' + fmtSec(r.seconds) + '</td><td class="num"><b>' + fmtNum(r.score) + '</b></td>' +
@@ -1074,10 +1137,8 @@
     const states = { right: 0, partial: 0, wrong: 0, blank: 0 };
     g.rows.forEach(r => states[r.cells[gq].state]++);
     const f = $('gq-filter').value;
-    let rows = g.rows.filter(r => f === 'all' || r.cells[gq].state === f);
-    const sort = $('grades-sort').value;
-    if (sort === 'high') rows = rows.slice().sort((a, b) => (b.cells[gq].score || 0) - (a.cells[gq].score || 0));
-    if (sort === 'low') rows = rows.slice().sort((a, b) => (a.cells[gq].score || 0) - (b.cells[gq].score || 0));
+    const rows = sortRows(g.rows.filter(r => f === 'all' || r.cells[gq].state === f), gqSort, {
+      student_id: { value: r => r.student_id }, name: { value: r => r.name }, score: { value: r => r.cells[gq].score || 0 } });
     $('gq-count').textContent = '答對 ' + states.right + '・部分 ' + states.partial + '・答錯 ' + states.wrong + '・未作答 ' + states.blank + '（共 ' + n + ' 人）';
     const blanks = q.type === 'fill' ? q.answer.length : 0;
     // 填充題每一格一行，直排在同一欄裡，格數再多也不用左右捲動
@@ -1085,7 +1146,7 @@
       (blanks > 1 ? '<span class="blank-no">' + (k + 1) + '</span>' : '') + (b.ok ? '✓ ' : '✗ ') +
       (b.text ? '<span class="blank-text">' + esc(b.text) + '</span>' : '<span class="muted">（空白）</span>') +
       (!b.ok && b.text ? '<button class="btn ghost sm accept" data-accept-q="' + q.id + '" data-blank="' + k + '" data-text="' + esc(b.text) + '">算對</button>' : '') + '</div>';
-    const head = '<tr><th style="width:96px">學號</th><th style="width:96px">姓名</th><th class="num" style="width:92px">得分 / ' + fmtNum(q.points) + '</th>' +
+    const head = '<tr>' + sortHead('student_id', '學號', gqSort) + sortHead('name', '姓名', gqSort) + sortHead('score', '得分 / ' + fmtNum(q.points), gqSort, 'num') +
       '<th>' + (blanks > 1 ? '學生答案（第 1～' + blanks + ' 格）' : '學生答案') + '</th></tr>';
     $('gq-table').innerHTML = head + (rows.map(r => {
       const c = r.cells[gq];
@@ -1102,6 +1163,8 @@
   $('gq-next').addEventListener('click', () => { gq++; renderQuestionView(); });
   $('gq-filter').addEventListener('change', renderQuestionView);
   $('gq-table').addEventListener('click', async e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(gqSort, th.dataset.sort); return renderQuestionView(); }
     const a = e.target.closest('[data-attempt]');
     if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); return; }
     const t = e.target.closest('[data-accept-q]');
@@ -1119,6 +1182,8 @@
   });
 
   $('grades-table').addEventListener('click', e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(gradeSort, th.dataset.sort); return renderGrades(); }
     const a = e.target.closest('[data-attempt]');
     if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); }
   });

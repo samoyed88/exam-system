@@ -463,6 +463,12 @@ tr.avg-row td { font-weight: 700; background: var(--surface-2); border-top: 1.5p
 .blank-line .blank-text { word-break: break-all; }
 .blank-line .accept { margin-left: auto; font-family: inherit; font-size: .72rem; padding: .05rem .5rem; }
 
+/* 可排序的欄位標題 */
+th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+th.sortable:hover { color: var(--brand); }
+th.sortable .arrow { font-size: .7rem; color: var(--brand); }
+th.sorted { color: var(--brand); }
+
 /* 自動更新狀態 */
 .live { font-size: .8rem; font-family: var(--mono); }
 .live.ng { color: var(--ng); font-family: inherit; }
