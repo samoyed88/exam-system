@@ -1,24 +1,83 @@
 /* 老師後台：考試設定、考場監控、各題分析、題庫、名單 */
 (function () {
   'use strict';
-  const { store, api, esc, fmtTime, LETTERS } = window.exam;
+  const { store, api, esc, fmtTime, clock, ask, LETTERS } = window.exam;
   const $ = id => document.getElementById(id);
 
   let token = store('exam_admin_token');
   let questions = [];
   let editingExam = null;
   let picked = [];
+  let pickedPoints = {};       // 題目 id → 這場考試的配分（空 = 題庫預設）
   let editingQ = null;
   let monitorExam = null;
   let monitorTimer = null;
   const TYPE_TEXT = { single: '單選', multi: '多選', fill: '填充' };
 
+  // 秒數 → 「12 分 05 秒」「48 秒」
+  function fmtSec(sec) {
+    if (sec == null) return '-';
+    const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+    return m ? m + ' 分 ' + String(s).padStart(2, '0') + ' 秒' : s + ' 秒';
+  }
+
   function call(method, path, body) {
     return api(method, path, body, token).catch(err => {
       if (err.status === 401) logout();
+      if (err.status === 403 && err.message === '請先修改預設密碼') {
+        forcePasswordChange();
+        return new Promise(() => {});  // 改完密碼後會重新載入畫面，原本的請求不用再處理
+      }
       throw err;
     });
   }
+
+  // ── 目前登入的管理員、修改密碼 ──
+
+  let me = null;               // {account, name, shared, must_change}
+
+  async function loadMe() {
+    try { me = await api('GET', '/api/admin/me', undefined, token); } catch (err) { me = null; }
+    $('whoami').textContent = me ? (me.name ? me.name + '（' + me.account + '）' : me.account) : '';
+    $('whoami').classList.toggle('hidden', !me);
+    $('my-pw').classList.toggle('hidden', !me);
+    // 「管理員」分頁只有最高管理員看得到
+    document.querySelector('#tabs [data-tab="admins"]').classList.toggle('hidden', !me || me.role !== 'owner');
+    return me;
+  }
+
+  // 第一次用預設密碼登入：一定要改完才能用；自己按「修改密碼」時可以取消
+  async function changePassword(forced) {
+    let error = '';
+    for (;;) {
+      const ok = await ask(forced ? '請先修改預設密碼' : '修改密碼',
+        (forced ? '<p>這個帳號還在使用預設密碼，改完之後才能使用後台。</p>' : '') +
+        '<label>目前的密碼</label><input type="password" id="cp-old" autocomplete="current-password">' +
+        '<label>新密碼' + (me && me.password_min > 1 ? '（至少 ' + me.password_min + ' 個字元）' : '') + '</label><input type="password" id="cp-new" autocomplete="new-password">' +
+        '<label>再輸入一次新密碼</label><input type="password" id="cp-again" autocomplete="new-password">' +
+        (error ? '<div class="msg ng">' + esc(error) + '</div>' : ''), '修改密碼', forced ? '登出' : '取消');
+      if (!ok) { if (forced) logout(); return false; }
+      const oldPw = $('cp-old').value, newPw = $('cp-new').value;
+      if (newPw !== $('cp-again').value) { error = '兩次輸入的新密碼不一樣'; continue; }
+      try {
+        const r = await api('POST', '/api/admin/me/password', { old_password: oldPw, new_password: newPw }, token);
+        token = r.token;
+        store('exam_admin_token', token);
+        await loadMe();
+        return true;
+      } catch (err) { error = err.message; }
+    }
+  }
+
+  let forcing = false;
+  async function forcePasswordChange() {
+    if (forcing) return;
+    forcing = true;
+    try { if (await changePassword(true)) route(); } finally { forcing = false; }
+  }
+
+  $('my-pw').addEventListener('click', async () => { if (await changePassword(false)) alertSaved(); });
+  function alertSaved() { $('whoami').textContent += '　✓ 密碼已更新'; setTimeout(loadMe, 3000); }
 
   function say(id, text, ok) {
     $(id).textContent = text;
@@ -26,17 +85,125 @@
   }
 
   function show(view) {
-    ['login', 'exams', 'monitor', 'scores', 'stats', 'questions', 'students'].forEach(v =>
+    ['login', 'exams', 'monitor', 'scores', 'stats', 'attempt', 'seats', 'items', 'grades', 'questions', 'students', 'logs', 'admins'].forEach(v =>
       $('view-' + v).classList.toggle('hidden', v !== view));
     $('tabs').classList.toggle('hidden', view === 'login');
     $('logout').classList.toggle('hidden', view === 'login');
+    $('whoami').classList.toggle('hidden', view === 'login' || !me);
+    $('my-pw').classList.toggle('hidden', view === 'login' || !me);
     if (view !== 'monitor') clearInterval(monitorTimer);
-    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams' }[view] || view;
+    const tab = { monitor: 'exams', scores: 'exams', stats: 'exams', attempt: 'exams', seats: 'exams', items: 'exams', grades: 'exams' }[view] || view;
     document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    // 每個畫面有自己的網址（#exam/6/grades），瀏覽器「返回」回到上一個後台畫面，重新整理也停在原畫面
+    currentView = view;
+    if (view !== 'login' && !routing) setHash(hashFor(view));
+    updateTitle();
   }
+
+  // ── 瀏覽器分頁標題：跟著目前畫面與表單變 ──
+
+  let currentView = 'login';
+
+  function updateTitle() {
+    let text = '';
+    if (currentView === 'login') text = '登入';
+    else if (currentView === 'exams' && !$('exam-form').classList.contains('hidden'))
+      text = editingExam ? '編輯考試：' + ($('e-title').value.trim() || '#' + editingExam) : '新增考試';
+    else if (currentView === 'questions' && !$('q-form').classList.contains('hidden')) text = $('q-form-title').textContent;
+    else if (currentView === 'monitor') text = ($('mon-title').textContent ? $('mon-title').textContent + '：' : '') + '考場監控';
+    else {
+      const h = document.querySelector('#view-' + currentView + ' h1');
+      text = h ? h.textContent.trim() : '';
+    }
+    document.title = (text ? text + '｜' : '') + '考試後台';
+  }
+
+  // 各畫面的標題多半是資料載入後才填上，標題文字或表單開關一變就跟著更新
+  new MutationObserver(updateTitle).observe(document.body, { subtree: true, childList: true, characterData: true,
+    attributes: true, attributeFilter: ['class'] });
+
+  function setHash(hash) {
+    hash = hash.startsWith('#') ? hash : '#' + hash;
+    if (!routing && location.hash !== hash) history.pushState(null, '', hash);
+  }
+
+  // ── 自動更新：考試進行中，成績總表、作答紀錄、考試列表也跟著更新（監控頁另外每 5 秒）──
+
+  function liveStatus(id, err, label) {
+    const t = new Date();
+    $(id).classList.toggle('ng', !!err);
+    $(id).textContent = err ? '更新失敗，稍後自動重試（' + err.message + '）'
+      : label + '・最後更新 ' + [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  }
+
+  // 重畫表格時保留捲動位置，不然每次自動更新都會跳回最上面
+  function keepScroll(render) {
+    const boxes = [...document.querySelectorAll('.scroll-table')].map(el => [el, el.scrollTop]);
+    render();
+    boxes.forEach(([el, top]) => { el.scrollTop = top; });
+  }
+
+  setInterval(() => {
+    if (!token || document.hidden || document.querySelector('#modal:not(.hidden)')) return;
+    if (currentView === 'grades' && grades) loadGrades(true);
+    else if (currentView === 'attempt' && currentAttempt) openAttempt(currentAttempt, attemptFrom, true);
+    else if (currentView === 'exams' && $('exam-form').classList.contains('hidden')) loadExams();
+  }, 10000);
+
+  // ── 網址與畫面對應 ──
+
+  let routing = false;         // 依網址切換畫面時不要再新增一筆瀏覽紀錄
+  let currentAttempt = null;
+  const EXAM_VIEWS = { monitor: '', scores: 'scores', stats: 'stats', items: 'items', grades: 'grades', seats: 'seats' };
+
+  function hashFor(view) {
+    if (view === 'attempt') return 'exam/' + monitorExam + '/attempt/' + currentAttempt;
+    if (view in EXAM_VIEWS) return 'exam/' + monitorExam + (EXAM_VIEWS[view] ? '/' + EXAM_VIEWS[view] : '');
+    return view;
+  }
+
+  async function route() {
+    const h = decodeURIComponent(location.hash.slice(1));
+    const m = h.match(/^exam\/(\d+)(?:\/(\w+)(?:\/(\d+))?)?$/);
+    const qm = h.match(/^question\/(\d+)\/edit$/);
+    routing = true;
+    try {
+      if (h === 'exams/new' || (m && m[2] === 'edit')) {
+        openTab('exams');
+        return await openExamForm(h === 'exams/new' ? null : +m[1]);
+      }
+      if (h === 'questions/new' || qm) {
+        show('questions');
+        await loadQuestions();
+        if (qm && !questions.some(q => q.id === +qm[1])) return;
+        return openQForm(qm ? +qm[1] : null);
+      }
+      if (!m) {
+        $('exam-form').classList.add('hidden');
+        $('q-form').classList.add('hidden');
+        const tabs = ['exams', 'questions', 'students', 'logs'].concat(me && me.role === 'owner' ? ['admins'] : []);
+        return openTab(tabs.includes(h) ? h : 'exams');
+      }
+      monitorExam = +m[1];
+      if (!m[2]) return openMonitor(monitorExam);
+      // 直接開子畫面（重新整理、返回）時，標題要先有考試名稱
+      if ($('mon-title').dataset.exam !== String(monitorExam)) {
+        try { $('mon-title').textContent = (await call('GET', '/api/admin/exams/' + monitorExam)).title; } catch (err) { return openTab('exams'); }
+        $('mon-title').dataset.exam = monitorExam;
+      }
+      const open = { scores: loadScores, stats: () => loadStats(), items: loadItems, grades: loadGrades, seats: loadSeats,
+        attempt: () => openAttempt(+m[3], 'monitor') }[m[2]];
+      (open || (() => openMonitor(monitorExam)))();
+    } finally {
+      routing = false;
+    }
+  }
+
+  window.addEventListener('popstate', () => { if (token) route(); });
 
   function logout() {
     token = null;
+    me = null;
     store('exam_admin_token', null);
     show('login');
   }
@@ -44,11 +211,14 @@
   $('login-form').addEventListener('submit', async e => {
     e.preventDefault();
     try {
-      const r = await api('POST', '/api/admin/login', { password: $('pw').value });
+      const r = await api('POST', '/api/admin/login', { account: $('acct').value, password: $('pw').value });
       token = r.token;
       store('exam_admin_token', token);
       $('pw').value = '';
-      openTab('exams');
+      $('login-msg').textContent = '';
+      await loadMe();
+      if (r.must_change) { show('exams'); return forcePasswordChange(); }
+      route();
     } catch (err) {
       say('login-msg', err.message);
     }
@@ -57,10 +227,14 @@
   document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => openTab(b.dataset.tab)));
 
   function openTab(tab) {
+    $('exam-form').classList.add('hidden');
+    $('q-form').classList.add('hidden');
     show(tab);
     if (tab === 'exams') loadExams();
     if (tab === 'questions') loadQuestions();
     if (tab === 'students') loadStudents();
+    if (tab === 'logs') loadLogs();
+    if (tab === 'admins') loadAdmins();
   }
 
   function readFile(input) {
@@ -80,17 +254,19 @@
     const exams = await call('GET', '/api/admin/exams');
     const WINDOW = { not_started: '<span class="badge gray">尚未開放</span>', open: '<span class="badge ok">開放中</span>', closed: '<span class="badge ng">已關閉</span>' };
     const when = t => t ? esc(t.replace('T', ' ')) : '';
-    $('exam-table').innerHTML = '<tr><th>名稱</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>打散</th><th>已進場</th><th></th></tr>' +
+    $('exam-table').innerHTML = '<tr><th>名稱</th><th>班級</th><th>狀態</th><th>題數</th><th>作答時間</th><th>開放 ～ 關閉</th><th>打散</th><th>已進場</th><th></th></tr>' +
       exams.map(e => '<tr><td><b>' + esc(e.title) + '</b></td>' +
+        '<td>' + (e.class_names ? esc(e.class_names.split(',').join('、')) : '<span class="muted">不限</span>') + '</td>' +
         '<td>' + (e.published ? WINDOW[e.window] : '<span class="badge gray">學生看不到</span>') + '</td>' +
         '<td>' + e.question_count + '</td><td>' + e.duration_min + ' 分鐘</td>' +
         '<td class="nowrap">' + (when(e.start_at) || '立即') + ' ～ ' + (when(e.end_at) || '不限') + '</td>' +
         '<td class="nowrap">' + [e.shuffle_q ? '題目' : '', e.shuffle_opt ? '選項' : ''].filter(Boolean).join('、') + '</td>' +
         '<td>' + e.attempt_count + '</td>' +
         '<td class="row"><button class="btn sm" data-monitor="' + e.id + '">監控／成績</button>' +
+        '<a class="btn ghost sm" href="/?preview=' + e.id + '" target="_blank" rel="noopener" title="用學生畫面試考，不會留下紀錄">模擬作答</a>' +
         '<button class="btn ghost sm" data-edit="' + e.id + '">編輯</button>' +
         '<button class="btn danger sm" data-del="' + e.id + '">刪除</button></td></tr>').join('');
-    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="8" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
+    if (!exams.length) $('exam-table').innerHTML += '<tr><td colspan="9" class="muted">還沒有考試，先到「題庫」匯入題目，再回來新增考試。</td></tr>';
   }
 
   $('exam-table').addEventListener('click', async e => {
@@ -104,14 +280,23 @@
   });
 
   $('new-exam').addEventListener('click', () => openExamForm(null));
-  $('cancel-exam').addEventListener('click', () => $('exam-form').classList.add('hidden'));
+  $('cancel-exam').addEventListener('click', closeExamForm);
+  function closeExamForm() {
+    $('exam-form').classList.add('hidden');
+    setHash('exams');
+    updateTitle();
+  }
+  $('e-title').addEventListener('input', updateTitle);
 
   async function openExamForm(id) {
-    questions = await call('GET', '/api/admin/questions');
+    setHash(id ? 'exam/' + id + '/edit' : 'exams/new');
+    let classList;
+    [questions, classList] = await Promise.all([call('GET', '/api/admin/questions'), call('GET', '/api/admin/classes')]);
     editingExam = id;
     const e = id ? await call('GET', '/api/admin/exams/' + id) : {
       title: '', duration_min: 50, start_at: '', end_at: '', class_names: '', show_mode: 'score',
       review_when: 'immediate', review_at: '', allow_review: 1, review_until: '', shuffle_q: 1, shuffle_opt: 1, published: 0, allowed_ips: '', question_ids: [],
+      focus_mode: 'record', focus_limit: 3, fullscreen: 0, block_copy: 0,
     };
     $('exam-form-title').textContent = id ? '編輯考試' : '新增考試';
     $('e-title').value = e.title;
@@ -130,9 +315,24 @@
     $('e-shuffle-q').value = e.shuffle_q ? '1' : '0';
     $('e-shuffle-opt').value = e.shuffle_opt ? '1' : '0';
     $('e-published').checked = !!e.published;
+    // 已設定但班級被刪掉的名稱也列出來，存檔前看得到
+    const chosen = e.class_names ? e.class_names.split(',').map(x => x.trim()).filter(Boolean) : [];
+    const names = classList.classes.map(c => c.name);
+    chosen.forEach(n => { if (!names.includes(n)) names.push(n); });
+    $('e-classes').innerHTML = names.map(n => {
+      const c = classList.classes.find(x => x.name === n);
+      return '<label class="check"><input type="checkbox" value="' + esc(n) + '"' + (chosen.includes(n) ? ' checked' : '') + '> ' + esc(n) +
+        ' <span class="muted">' + (c ? c.students + ' 人' : '（班級已不存在）') + '</span></label>';
+    }).join('') || '<span class="muted">還沒有班級，到「名單」新增。</span>';
     $('e-ips').value = e.allowed_ips;
+    $('e-focus').value = e.focus_mode;
+    $('e-focus-limit').value = e.focus_limit;
+    $('e-fullscreen').checked = !!e.fullscreen;
+    $('e-block-copy').checked = !!e.block_copy;
+    syncFocus();
     $('e-filter').value = '';
     picked = e.question_ids.slice();
+    pickedPoints = Object.assign({}, e.question_points || {});
     renderPicker();
     $('exam-msg').textContent = '';
     $('exam-form').classList.remove('hidden');
@@ -147,6 +347,12 @@
     $('e-review-at-wrap').classList.toggle('hidden', $('e-review').value !== 'at_time');
     $('e-review-until-wrap').classList.toggle('hidden', $('e-allow-review').value !== 'until');
   }
+  function syncFocus() {
+    $('e-focus-limit-wrap').classList.toggle('hidden', !['lock', 'submit'].includes($('e-focus').value));
+    $('e-focus-limit-next').textContent = (+$('e-focus-limit').value || 0) + 1;
+  }
+  $('e-focus').addEventListener('change', syncFocus);
+  $('e-focus-limit').addEventListener('input', syncFocus);
   $('e-review').addEventListener('change', syncReview);
   $('e-allow-review').addEventListener('change', syncReview);
   $('e-start-on').addEventListener('change', syncTimeInputs);
@@ -165,11 +371,42 @@
         '<span>' + (n >= 0 ? '<b>' + (n + 1) + '.</b> ' : '') + '<span class="badge">' + TYPE_TEXT[q.type] + '</span> ' +
         esc(q.stem.slice(0, 80)) + ' <span class="muted">' + esc(q.tags) + '・' + q.points + ' 分</span></span></label>';
     }).join('') || '<p class="muted">題庫是空的。</p>';
-    const pts = picked.reduce((s, id) => s + ((questions.find(q => q.id === id) || {}).points || 0), 0);
-    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + pts + ' 分';
+    updatePickedTotal();
+    $('e-picked-wrap').classList.toggle('hidden', !picked.length);
+    $('e-picked-list').innerHTML = '<tr><th style="width:56px">順序</th><th>題目</th><th style="width:150px">配分</th><th style="width:96px"></th></tr>' +
+      picked.map((id, n) => {
+        const q = questions.find(x => x.id === id) || { stem: '（題目已刪除）', tags: '', points: 0, type: 'single' };
+        const v = pickedPoints[id] != null ? pickedPoints[id] : '';
+        return '<tr><td>' + (n + 1) + '</td><td><span class="badge">' + TYPE_TEXT[q.type] + '</span> ' + esc(q.stem.slice(0, 60)) +
+          ' <span class="muted">' + esc(q.tags) + '</span></td>' +
+          '<td><input type="number" class="cut-input" min="0" step="any" data-pts="' + id + '" value="' + esc(v) + '" placeholder="' + q.points + '"> 分</td>' +
+          '<td class="row"><button class="btn ghost sm" data-up="' + n + '"' + (n ? '' : ' disabled') + '>↑</button>' +
+          '<button class="btn ghost sm" data-down="' + n + '"' + (n < picked.length - 1 ? '' : ' disabled') + '>↓</button></td></tr>';
+      }).join('');
+  }
+
+  function updatePickedTotal() {
+    const pointOf = id => pickedPoints[id] != null && pickedPoints[id] !== '' ? +pickedPoints[id] : ((questions.find(q => q.id === id) || {}).points || 0);
+    const pts = picked.reduce((s, id) => s + pointOf(id), 0);
+    $('e-picked').textContent = '已選 ' + picked.length + ' 題，共 ' + Math.round(pts * 100) / 100 + ' 分';
   }
 
   $('e-filter').addEventListener('input', renderPicker);
+  $('e-picked-list').addEventListener('input', e => { if (e.target.dataset.pts) e.target.dispatchEvent(new Event('change', { bubbles: true })); });
+  $('e-picked-list').addEventListener('change', e => {
+    const id = e.target.dataset.pts;
+    if (!id) return;
+    if (e.target.value === '') delete pickedPoints[id]; else pickedPoints[id] = +e.target.value;
+    updatePickedTotal();  // 不重畫表格：按「儲存」時輸入框失焦觸發 change，重畫會把正在點的元素移除
+  });
+  $('e-picked-list').addEventListener('click', e => {
+    const up = e.target.dataset.up, down = e.target.dataset.down;
+    const i = up != null ? +up : down != null ? +down : -1;
+    if (i < 0) return;
+    const j = up != null ? i - 1 : i + 1;
+    [picked[i], picked[j]] = [picked[j], picked[i]];
+    renderPicker();
+  });
   $('e-questions').addEventListener('change', e => {
     const id = +e.target.value;
     if (!id) return;
@@ -190,17 +427,21 @@
     const body = {
       title: $('e-title').value, duration_min: +$('e-duration').value,
       start_at: $('e-start-on').checked ? $('e-start').value : '',
-      end_at: $('e-end-on').checked ? $('e-end').value : '', class_names: '',
+      end_at: $('e-end-on').checked ? $('e-end').value : '',
+      class_names: [...document.querySelectorAll('#e-classes input:checked')].map(i => i.value).join(','),
       show_mode: $('e-show').value, review_when: $('e-review').value, review_at: $('e-review-at').value,
       allow_review: $('e-allow-review').value !== 'no',
       review_until: $('e-allow-review').value === 'until' ? $('e-review-until').value : '',
       shuffle_q: $('e-shuffle-q').value === '1', shuffle_opt: $('e-shuffle-opt').value === '1',
       published: $('e-published').checked, allowed_ips: $('e-ips').value, question_ids: picked,
+      question_points: Object.fromEntries(picked.filter(id => pickedPoints[id] != null && pickedPoints[id] !== '').map(id => [id, +pickedPoints[id]])),
+      focus_mode: $('e-focus').value, focus_limit: +$('e-focus-limit').value || 3,
+      fullscreen: $('e-fullscreen').checked, block_copy: $('e-block-copy').checked,
     };
     try {
       if (editingExam) await call('PUT', '/api/admin/exams/' + editingExam, body);
       else await call('POST', '/api/admin/exams', body);
-      $('exam-form').classList.add('hidden');
+      closeExamForm();
       loadExams();
     } catch (err) {
       say('exam-msg', err.message);
@@ -211,6 +452,7 @@
 
   function openMonitor(id) {
     monitorExam = id;
+    $('mon-preview').href = '/?preview=' + id;
     show('monitor');
     $('mon-csv').onclick = downloadCsv;
     refreshMonitor();
@@ -229,11 +471,56 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // ── 可排序的表格：點欄位標題排序，再點一次反過來；沒有值的一律排在最後 ──
+
+  const collator = new Intl.Collator('zh-Hant', { numeric: true });
+
+  function sortRows(rows, state, columns) {
+    const col = columns[state.key];
+    if (!col) return rows;
+    const get = col.value;
+    return rows.slice().sort((a, b) => {
+      const x = get(a), y = get(b);
+      const xe = x == null || x === '', ye = y == null || y === '';
+      if (xe || ye) return xe === ye ? 0 : xe ? 1 : -1;
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : collator.compare(String(x), String(y));
+      return c * state.dir;
+    });
+  }
+
+  function sortHead(key, label, state, cls) {
+    const arrow = state.key === key ? (state.dir > 0 ? ' ▲' : ' ▼') : '';
+    return '<th class="sortable' + (cls ? ' ' + cls : '') + (arrow ? ' sorted' : '') + '" data-sort="' + key + '" title="點一下排序">' + label + '<span class="arrow">' + arrow + '</span></th>';
+  }
+
+  function toggleSort(state, key) {
+    if (state.key === key) state.dir = -state.dir;
+    else Object.assign(state, { key, dir: 1 });
+  }
+
+  const monSort = { key: 'student_id', dir: 1 };
+  const STATUS_ORDER = { in_progress: 0, submitted: 1, absent: 2 };
+  const MON_COLUMNS = {
+    student_id: { label: '學號', value: r => r.student_id },
+    name: { label: '姓名', value: r => r.name },
+    status: { label: '狀態', value: r => r.locked ? -1 : STATUS_ORDER[r.status] },
+    answered: { label: '進度', value: r => r.status === 'absent' ? null : r.answered },
+    seconds: { label: '用時', value: r => r.attempt_id ? r.seconds : null },
+    score: { label: '得分', value: r => r.score },
+    ip: { label: 'IP', value: r => r.ip },
+    device: { label: '電腦', value: r => r.device },
+    tab_switches: { label: '切換視窗', value: r => r.attempt_id ? r.tab_switches : null },
+    flags: { label: '注意', value: r => r.flags.length || null },
+  };
+  let monData = null;
+
   async function refreshMonitor() {
     let data;
     try { data = await call('GET', '/api/admin/exams/' + monitorExam + '/monitor'); }
-    catch (err) { return; }
+    catch (err) { return liveStatus('mon-updated', err); }
+    liveStatus('mon-updated', null, '每 5 秒自動更新');
     $('mon-title').textContent = data.exam.title;
+    $('mon-title').dataset.exam = monitorExam;
     const count = s => data.rows.filter(r => r.status === s).length;
     const done = data.rows.filter(r => r.status === 'submitted');
     const avg = done.length ? (done.reduce((s, r) => s + r.score, 0) / done.length).toFixed(1) : '-';
@@ -242,22 +529,44 @@
       '<div><b>' + count('absent') + '</b><span>未進場</span></div>' +
       '<div><b style="color:var(--warn)">' + count('in_progress') + '</b><span>作答中</span></div>' +
       '<div><b style="color:var(--ok)">' + count('submitted') + '</b><span>已交卷</span></div>' +
+      (data.rows.some(r => r.locked) ? '<div><b style="color:var(--ng)">' + data.rows.filter(r => r.locked).length + '</b><span>已鎖定，等你解鎖</span></div>' : '') +
       '<div><b>' + avg + '</b><span>平均分</span></div>';
+    monData = data;
+    renderMonitorTable();
+  }
+
+  function renderMonitorTable() {
+    const data = monData;
     const status = { absent: '<span class="badge">未進場</span>', in_progress: '<span class="badge warn">作答中</span>', submitted: '<span class="badge ok">已交卷</span>' };
-    $('mon-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>狀態</th><th>進度</th><th>得分</th><th>IP</th><th>電腦</th><th>切換視窗</th><th>注意</th><th></th></tr>' +
-      data.rows.map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
-        '<td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
-        '<td>' + status[r.status] + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
+    const locked = '<span class="badge ng">已鎖定</span>';
+    $('mon-table').innerHTML = '<tr>' + Object.entries(MON_COLUMNS).map(([k, c]) => sortHead(k, c.label, monSort)).join('') + '<th></th></tr>' +
+      sortRows(data.rows, monSort, MON_COLUMNS).map(r => '<tr class="' + (r.flags.length ? 'flagged' : '') + '">' +
+        '<td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
+        '<td>' + (r.locked ? locked : status[r.status]) + '</td><td>' + (r.status === 'absent' ? '' : r.answered + ' / ' + r.total) + '</td>' +
+        '<td>' + (r.attempt_id ? fmtSec(r.seconds) : '') + '</td>' +
         '<td>' + (r.score != null ? r.score + ' / ' + r.max_score : '') + '</td>' +
         '<td>' + esc(r.ip || '') + '</td><td>' + esc(r.device || '') + '</td><td>' + (r.tab_switches || '') + '</td>' +
         '<td>' + r.flags.map(esc).join('<br>') + '</td>' +
-        '<td class="row">' + (r.status === 'in_progress' ? '<button class="btn ghost sm" data-force="' + r.attempt_id + '">強制交卷</button>' : '') +
+        '<td class="row">' + (r.locked ? '<button class="btn sm" data-unlock="' + r.attempt_id + '">解鎖</button>' : '') +
+        (r.status === 'in_progress' ? '<button class="btn ghost sm" data-force="' + r.attempt_id + '">強制交卷</button>' : '') +
         (r.attempt_id ? '<button class="btn danger sm" data-reset="' + r.attempt_id + '" data-name="' + esc(r.name) + '">重考</button>' : '') +
         '</td></tr>').join('');
   }
 
+  // 有作答的學生，姓名可點開個人作答紀錄
+  function nameCell(r) {
+    return r.attempt_id ? '<a href="#" class="link-cell" data-attempt="' + r.attempt_id + '" title="查看作答紀錄">' + esc(r.name) + '</a>' : esc(r.name);
+  }
+
   $('mon-table').addEventListener('click', async e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(monSort, th.dataset.sort); return renderMonitorTable(); }
     const t = e.target;
+    if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'monitor'); return; }
+    if (t.dataset.unlock) {
+      await call('POST', '/api/admin/attempts/' + t.dataset.unlock + '/unlock');
+      refreshMonitor();
+    }
     if (t.dataset.force && confirm('確定要替這位學生交卷？')) {
       await call('POST', '/api/admin/attempts/' + t.dataset.force + '/force-submit');
       refreshMonitor();
@@ -342,6 +651,9 @@
       'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z';
   }
 
+  // 長條寬度約佔每格 60%，中間留空隙；題數少時不超過 40px
+  const barWidth = slot => Math.max(2, Math.min(40, slot * .6));
+
   function niceStep(max, ticks) {
     const raw = max / ticks, p = Math.pow(10, Math.floor(Math.log10(raw)));
     return [1, 2, 5, 10].map(m => m * p).find(s => s >= raw);
@@ -380,7 +692,8 @@
     const pw = W - m.l - m.r, ph = H - m.t - m.b, max = scaleMax();
     const x = v => m.l + pw * v / max;
     bs.forEach(b => {
-      const x0 = x(b.a) + 1, x1 = x(b.b) - 1, h = ph * b.rows.length / yMax;
+      const pad = (x(b.b) - x(b.a)) * .18;  // 長條之間留白，不要滿版
+      const x0 = x(b.a) + pad, x1 = x(b.b) - pad, h = ph * b.rows.length / yMax;
       const below = b.last ? b.b < sc.pass : b.b <= sc.pass;
       const selected = sc.mode === 'range' && sc.a === b.a && sc.b === b.b;
       if (b.rows.length) el('path', { d: barPath(x0, m.t + ph - h, Math.max(1, x1 - x0), h), class: 'mark' + (below ? ' ng' : '') + (selected ? ' sel' : '') }, svg);
@@ -425,11 +738,11 @@
     const rows = filtered();
     $('sc-count').textContent = rows.length + ' / ' + scores.rows.length + ' 人';
     const pct = r => scores.max_score ? round1(r.score / scores.max_score * 100) : 0;
-    $('sc-table').innerHTML = '<tr><th style="width:70px">名次</th><th>學號</th><th>姓名</th><th>分數</th><th>百分制</th><th>交卷時間</th></tr>' +
-      (rows.map(r => '<tr><td>' + r.rank + '</td><td>' + esc(r.student_id) + '</td><td>' + esc(r.name) + '</td>' +
+    $('sc-table').innerHTML = '<tr><th style="width:70px">名次</th><th>學號</th><th>姓名</th><th>分數</th><th>百分制</th><th>用時</th><th>交卷時間</th></tr>' +
+      (rows.map(r => '<tr><td>' + r.rank + '</td><td>' + esc(r.student_id) + '</td><td>' + nameCell(r) + '</td>' +
         '<td class="' + (value(r) < sc.pass ? 'score-ng' : '') + '">' + fmtNum(r.score) + ' / ' + fmtNum(scores.max_score) + '</td>' +
-        '<td>' + pct(r) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td></tr>').join('') ||
-        '<tr><td colspan="6" class="muted">沒有符合的學生</td></tr>');
+        '<td>' + pct(r) + '</td><td>' + fmtSec(r.seconds) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td></tr>').join('') ||
+        '<tr><td colspan="7" class="muted">沒有符合的學生</td></tr>');
   }
 
   function renderQuestionChart() {
@@ -440,10 +753,9 @@
     const W = 760, H = 220, m = { t: 12, r: 12, b: 30, l: 40 };
     const svg = frame(box, W, H, m, 100, 25, v => v + '%');
     const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
-    const gap = Math.min(2, slot * .2);
     const every = Math.ceil(qs.length / 25);
     qs.forEach((q, i) => {
-      const x0 = m.l + slot * i + gap, w = Math.max(1, slot - gap * 2);
+      const w = barWidth(slot), x0 = m.l + slot * i + (slot - w) / 2;
       const rate = q.rate || 0, h = ph * rate;
       if (q.rate != null && h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' }, svg);
       const last = i === qs.length - 1;
@@ -452,7 +764,8 @@
       const hit = el('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
       const stem = q.stem.length > 60 ? q.stem.slice(0, 60) + '…' : q.stem;
       hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + (i + 1) + ' 題　' + (q.rate == null ? '-' : Math.round(q.rate * 100) + '%') + '</b>' +
-        '<span class="muted">（' + TYPE_TEXT[q.type] + '・' + q.points + ' 分）</span><br>' + esc(stem)));
+        '<span class="muted">（' + TYPE_TEXT[q.type] + '・' + q.points + ' 分）</span><br>' + esc(stem) +
+        (q.avg_seconds != null ? '<br><span class="muted">平均停留 ' + fmtSec(q.avg_seconds) + '</span>' : '')));
       hit.addEventListener('mouseleave', e => tip(e, null));
       hit.addEventListener('click', e => { tip(e, null); loadStats(q.id); });
     });
@@ -507,6 +820,540 @@
     }
     say('sc-msg', '已複製 ' + rows.length + ' 人（可直接貼到 Excel）', true);
   });
+
+  $('sc-table').addEventListener('click', e => {
+    const t = e.target;
+    if (t.dataset.attempt) { e.preventDefault(); openAttempt(+t.dataset.attempt, 'scores'); }
+  });
+
+  // ── 個人作答紀錄 ──
+
+  let attemptFrom = 'monitor';
+  const EVENT_TEXT = {
+    start: ['開始作答', 'sys'], resume: ['重新進入考試頁', 'sys'], blur: ['離開考試畫面（切換視窗或分頁）', 'away'],
+    focus: ['回到考試畫面', 'answer'], submit: ['交卷', 'sys'], auto_submit: ['時間到，系統自動交卷', 'sys'],
+    force_submit: ['老師代為交卷', 'sys'], violation_submit: ['離開畫面超過次數，系統自動交卷', 'away'],
+    lock: ['離開畫面超過次數，作答鎖定', 'away'], unlock: ['老師解鎖', 'sys'],
+  };
+  const clockText = iso => {
+    const d = new Date(iso);
+    return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':');
+  };
+
+  $('attempt-back').addEventListener('click', () => attemptFrom === 'scores' ? loadScores() : attemptFrom === 'grades' ? loadGrades() : openMonitor(monitorExam));
+  $('attempt-mon').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+
+  async function openAttempt(id, from, refresh) {
+    currentAttempt = id;
+    attemptFrom = from;
+    if (!refresh) { show('attempt'); tip(null, null); }
+    $('attempt-from').innerHTML = from === 'scores' ? '成績統計 / ' : from === 'grades' ? '成績總表 / ' : '';
+    let d;
+    try { d = await call('GET', '/api/admin/attempts/' + id + '/log'); }
+    catch (err) { if (refresh) return liveStatus('at-updated', err); throw err; }
+    const scrolls = [...document.querySelectorAll('.scroll-table')].map(el => [el, el.scrollTop]);
+    const a = d.attempt, qs = d.questions;
+    $('at-title').textContent = d.student.name + '（' + d.student.student_id + '）：' + d.exam.title;
+    const answered = qs.filter(q => q.response).length;
+    const changes = qs.reduce((n, q) => n + Math.max(0, q.saves - 1), 0);
+    const ended = d.timeline.filter(e => e.kind.endsWith('submit')).pop();
+    $('at-summary').innerHTML = [
+      [a.score != null ? fmtNum(a.score) + ' / ' + fmtNum(a.max_score) : '作答中', '得分'],
+      [fmtSec(a.seconds), '用時（限時 ' + d.exam.duration_min + ' 分）'],
+      [answered + ' / ' + qs.length, '已作答題數'],
+      [changes, '改答次數'],
+      [a.tab_switches, '離開畫面次數'],
+      [ended ? EVENT_TEXT[ended.kind][0] : '尚未交卷', '交卷方式'],
+      [(a.device || '—') + '\n' + (a.ip || '—'), '電腦／IP', 'small'],
+    ].map(([v, t, cls]) => '<div' + (cls ? ' class="' + cls + '"' : '') + '><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+    renderDwellChart(qs);
+    const verdict = q => !q.response ? '<span class="badge gray">未作答</span>' : q.score >= q.points ? '<span class="badge ok">對</span>' :
+      q.score > 0 ? '<span class="badge warn">部分</span>' : '<span class="badge ng">錯</span>';
+    // 一題一題往下排：答案再長也只換行，不用左右捲動
+    const open = new Set([...document.querySelectorAll('#at-questions details[open]')].map(el => el.dataset.q));
+    $('at-questions').innerHTML = qs.map(q => {
+      let answer;
+      if (q.type === 'fill') {
+        answer = '<div class="blank-cell">' + q.blanks.map((b, k) => '<div class="blank-line ' + (b.ok ? 'ok' : 'ng') + '">' +
+          (q.blanks.length > 1 ? '<span class="blank-no">' + (k + 1) + '</span>' : '') + (b.ok ? '✓ ' : '✗ ') +
+          (b.text ? '<span class="blank-text">' + esc(b.text) + '</span>' : '<span class="muted">（空白）</span>') +
+          (b.ok ? '' : '<span class="blank-key">正解 ' + q.answer_blanks[k].map(esc).join(' 或 ') + '</span>') + '</div>').join('') + '</div>';
+      } else {
+        answer = '<div class="aq-ans"><div><span class="aq-label">學生答案</span>' + (q.response_detail ? esc(q.response_detail) : '<span class="muted">未作答</span>') + '</div>' +
+          '<div><span class="aq-label">正確答案</span><span class="aq-key">' + esc(q.answer_detail) + '</span></div></div>';
+      }
+      return '<div class="aq"><div class="aq-head"><span class="q-num">第 ' + q.no + ' 題</span><span class="badge">' + TYPE_TEXT[q.type] + '</span>' + verdict(q) +
+        '<b class="aq-score">' + (q.score != null ? fmtNum(q.score) : 0) + ' / ' + fmtNum(q.points) + ' 分</b>' +
+        '<span class="muted aq-meta">停留 ' + fmtSec(q.seconds) + '（全班平均 ' + fmtSec(q.avg_seconds) + '）・作答 ' +
+        (q.saves > 1 ? '<b style="color:var(--warn)">' + q.saves + ' 次</b>' : (q.saves || 0) + ' 次') + '</span></div>' +
+        '<div class="aq-stem">' + esc(q.stem) + '</div>' +
+        (q.code ? '<details data-q="' + q.id + '"' + (open.has(String(q.id)) ? ' open' : '') + '><summary class="muted">程式碼</summary><pre>' + esc(q.code) + '</pre></details>' : '') +
+        answer + '</div>';
+    }).join('');
+    const t0 = new Date(a.started_at);
+    $('at-timeline').innerHTML = '<tr><th style="width:90px">時間</th><th style="width:90px">經過</th><th>事件</th></tr>' +
+      d.timeline.map(e => {
+        const sec = Math.max(0, (new Date(e.at) - t0) / 1000);
+        let text, cls;
+        if (e.kind === 'answer') {
+          text = '第 ' + e.no + ' 題' + (e.change ? '改答為 ' : '作答 ') + (e.detail || '（清空）');
+          cls = e.change ? 'change' : 'answer';
+        } else {
+          [text, cls] = EVENT_TEXT[e.kind] || [e.kind, 'answer'];
+          if (e.detail) text += '（' + e.detail + '）';
+        }
+        return '<tr><td>' + clockText(e.at) + '</td><td class="muted">' + clock(sec) + '</td>' +
+          '<td class="timeline-ev ' + cls + '">' + esc(text) + '</td></tr>';
+      }).join('');
+    scrolls.forEach(([el, top]) => { el.scrollTop = top; });
+    liveStatus('at-updated', null, a.submitted_at ? '已交卷' : '作答中・每 10 秒自動更新');
+  }
+
+  function renderDwellChart(qs) {
+    const box = $('at-chart');
+    if (!qs.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
+    const W = 760, H = 240, m = { t: 12, r: 12, b: 30, l: 48 };
+    const top = Math.max(10, ...qs.map(q => Math.max(q.seconds, q.avg_seconds || 0)));
+    // 刻度取整秒、整分，避免出現「1.7 分」
+    const step = [10, 15, 20, 30, 60, 120, 180, 300, 600, 900].find(s => s * 4 >= top) || 1800;
+    const yMax = Math.ceil(top / step) * step;
+    const svg = frame(box, W, H, m, yMax, step, v => v < 60 ? v + ' 秒' : v % 60 ? Math.floor(v / 60) + ' 分 ' + v % 60 + ' 秒' : v / 60 + ' 分');
+    const pw = W - m.l - m.r, ph = H - m.t - m.b, slot = pw / qs.length;
+    const every = Math.ceil(qs.length / 25);
+    qs.forEach((q, i) => {
+      const w = barWidth(slot), x0 = m.l + slot * i + (slot - w) / 2, h = ph * q.seconds / yMax;
+      const cls = !q.response ? ' empty' : q.score >= q.points ? '' : q.score > 0 ? ' part' : ' ng';
+      if (h > 0) el('path', { d: barPath(x0, m.t + ph - h, w, h), class: 'mark' + cls }, svg);
+      if (q.avg_seconds != null) {
+        const y = m.t + ph * (1 - q.avg_seconds / yMax);
+        el('line', { x1: x0, x2: x0 + w, y1: y, y2: y, class: 'avg' }, svg);
+      }
+      const last = i === qs.length - 1;
+      if (last || (i % every === 0 && qs.length - 1 - i >= every / 2))
+        el('text', { x: x0 + w / 2, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = q.no;
+      const hit = el('rect', { x: m.l + slot * i, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
+      const stem = q.stem.length > 60 ? q.stem.slice(0, 60) + '…' : q.stem;
+      hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + q.no + ' 題　停留 ' + fmtSec(q.seconds) + '</b><br>' +
+        '<span class="muted">全班平均 ' + fmtSec(q.avg_seconds) + '・作答 ' + q.saves + ' 次・' +
+        (q.response ? '答 ' + esc(q.response) + '（' + fmtNum(q.score) + ' / ' + q.points + ' 分）' : '未作答') + '</span><br>' + esc(stem)));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+    });
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（這位學生看到的順序）';
+  }
+
+  // ── 試題分析 ──
+
+  const pctText = v => v == null ? '—' : (Math.round(v * 10000) / 100).toFixed(2) + '%';
+
+  async function download(path, filename) {
+    const res = await fetch(path, { headers: { Authorization: 'Bearer ' + token } });
+    if (!res.ok) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  $('mon-items').addEventListener('click', loadItems);
+  $('items-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+  $('items-csv').addEventListener('click', e => { e.preventDefault(); download('/api/admin/exams/' + monitorExam + '/items.csv', 'exam-' + monitorExam + '-items.csv'); });
+
+  async function loadItems() {
+    show('items');
+    tip(null, null);
+    const d = await call('GET', '/api/admin/exams/' + monitorExam + '/items');
+    $('items-title').textContent = d.exam.title + '：試題分析';
+    const alphaNote = d.alpha == null ? '' : d.alpha >= .7 ? '良好' : d.alpha >= .5 ? '尚可' : '偏低';
+    $('items-summary').innerHTML = [
+      [d.count, '已交卷人數'], [d.mean == null ? '—' : fmtNum(d.mean) + ' / ' + fmtNum(d.max_score), '平均分數'],
+      [d.items.length, '題數'], [d.alpha == null ? '—' : d.alpha.toFixed(2), '信度 α' + (alphaNote ? '（' + alphaNote + '）' : '')],
+      [d.items.filter(i => i.flags.length).length, '需要檢查的題目'],
+    ].map(([v, t]) => '<div><b>' + esc(String(v)) + '</b><span>' + esc(t) + '</span></div>').join('');
+    renderItemsChart(d.items);
+    $('items-table').innerHTML = '<tr><th>題號</th><th>題型</th><th>概念名稱／能力指標</th><th class="num">配分</th><th class="num">作答記錄</th>' +
+      '<th class="num">答對率</th><th class="num">標準差</th><th class="num">隨機猜測分數</th><th class="num">預期權重</th>' +
+      '<th class="num">有效權重</th><th class="num">鑑別指數</th><th class="num">鑑別效率</th><th></th></tr>' +
+      (d.items.map(i => '<tr class="' + (i.discrimination != null && i.discrimination < 0 ? 'item-bad' : i.flags.length ? 'item-warn' : '') + '"' +
+        (i.flags.length ? ' title="' + esc(i.flags.join('\n')) + '"' : '') + '>' +
+        '<td>' + i.no + '</td><td>' + TYPE_TEXT[i.type] + '</td><td title="' + esc(i.stem) + '">' + esc(i.name) + '</td>' +
+        '<td class="num">' + fmtNum(i.points) + '</td><td class="num">' + i.count + '</td>' +
+        [i.facility, i.sd, i.guess, i.intended, i.effective, i.discrimination, i.efficiency].map(v => '<td class="num">' + pctText(v) + '</td>').join('') +
+        '<td><button class="btn ghost sm" data-item="' + i.id + '">選項分布</button></td></tr>').join('') ||
+        '<tr><td colspan="13" class="muted">這場考試沒有題目。</td></tr>');
+  }
+
+  $('items-table').addEventListener('click', e => { const id = e.target.dataset.item; if (id) loadStats(+id); });
+
+  // 答對率與鑑別效率並排；鑑別效率可能是負的，往基線下方畫
+  function renderItemsChart(items) {
+    const box = $('items-chart');
+    if (!items.length) { box.innerHTML = '<p class="muted">這場考試沒有題目。</p>'; return; }
+    const vals = items.flatMap(i => [i.facility, i.efficiency]).filter(v => v != null).map(v => v * 100);
+    const lo = Math.min(0, Math.floor(Math.min(0, ...vals) / 20) * 20), hi = 100;
+    const W = 760, H = 280, m = { t: 12, r: 12, b: 34, l: 44 };
+    box.innerHTML = '';
+    const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': '各題答對率與鑑別效率' }, box);
+    const ph = H - m.t - m.b, pw = W - m.l - m.r;
+    const y = v => m.t + ph * (hi - v) / (hi - lo);
+    for (let v = lo; v <= hi; v += 20) {
+      el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), class: v === 0 ? 'axis' : 'grid' }, svg);
+      el('text', { x: m.l - 6, y: y(v) + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = v + '%';
+    }
+    const slot = pw / items.length, w = Math.max(2, Math.min(22, slot * .3)), gap = 2;
+    const every = Math.ceil(items.length / 25);
+    items.forEach((it, k) => {
+      const cx = m.l + slot * k + slot / 2;
+      [[it.facility, 'mark', cx - w - gap / 2], [it.efficiency, 'mark part', cx + gap / 2]].forEach(([v, cls, x0]) => {
+        if (v == null) return;
+        const yv = y(v * 100), y0 = y(0);
+        if (Math.abs(yv - y0) < .5) return;
+        el('path', { d: v >= 0 ? barPath(x0, yv, w, y0 - yv) : barPathDown(x0, y0, w, yv - y0), class: cls }, svg);
+      });
+      if (k === items.length - 1 || (k % every === 0 && items.length - 1 - k >= every / 2))
+        el('text', { x: cx, y: H - m.b + 16, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = it.no;
+      const hit = el('rect', { x: m.l + slot * k, y: m.t, width: slot, height: ph, class: 'hit' }, svg);
+      hit.addEventListener('mousemove', e => tip(e, '<b>第 ' + it.no + ' 題　' + esc(it.name) + '</b><br>答對率 ' + pctText(it.facility) +
+        '<br>鑑別效率 ' + pctText(it.efficiency) + '<br><span class="muted">鑑別指數 ' + pctText(it.discrimination) + '</span>' +
+        (it.flags.length ? '<br><span style="color:var(--ng)">' + it.flags.map(esc).join('<br>') + '</span>' : '')));
+      hit.addEventListener('mouseleave', e => tip(e, null));
+      hit.addEventListener('click', e => { tip(e, null); loadStats(it.id); });
+    });
+    el('text', { x: m.l + pw / 2, y: H - 2, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = '題號（考卷順序）';
+  }
+
+  // 往下的長條：頂端貼齊基線、底部 4px 圓角
+  function barPathDown(x, y, w, h) {
+    const r = Math.min(4, w / 2, h);
+    return 'M' + x + ',' + y + 'V' + (y + h - r) + 'Q' + x + ',' + (y + h) + ' ' + (x + r) + ',' + (y + h) +
+      'H' + (x + w - r) + 'Q' + (x + w) + ',' + (y + h) + ' ' + (x + w) + ',' + (y + h - r) + 'V' + y + 'Z';
+  }
+
+  // ── 成績總表 ──
+
+  let grades = null;
+  const gradeSort = { key: 'student_id', dir: 1 };   // 總表：點欄位標題排序
+  const gqSort = { key: 'student_id', dir: 1 };      // 逐題檢視：點欄位標題排序
+  let gq = 0;                  // 逐題檢視目前的題目（索引）
+  const MARK = { right: '<span class="mark-right" title="答對">✓</span>', wrong: '<span class="mark-wrong" title="答錯">✗</span>',
+    partial: '<span class="mark-partial" title="部分得分">◐</span>', blank: '<span class="mark-blank" title="未作答">－</span>' };
+
+  $('mon-grades').addEventListener('click', () => loadGrades());
+  $('grades-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+  $('grades-mode').addEventListener('change', renderGrades);
+  // 上方的排序選單同時設定兩種顯示的排序（欄位標題也可以直接點）
+  $('grades-sort').addEventListener('change', () => {
+    const v = $('grades-sort').value;
+    Object.assign(gradeSort, v === 'id' ? { key: 'student_id', dir: 1 } : { key: 'score', dir: v === 'high' ? -1 : 1 });
+    Object.assign(gqSort, v === 'id' ? { key: 'student_id', dir: 1 } : { key: 'score', dir: v === 'high' ? -1 : 1 });
+    renderGrades();
+  });
+  $('grades-xlsx').addEventListener('click', () => download('/api/admin/exams/' + monitorExam + '/grades.xlsx',
+    $('grades-title').textContent.replace('：成績總表', '') + '-成績.xlsx'));
+
+  async function loadGrades(refresh) {
+    if (!refresh) { show('grades'); $('grades-msg').textContent = ''; }
+    try { grades = await call('GET', '/api/admin/exams/' + monitorExam + '/gradebook'); }
+    catch (err) { if (refresh) return liveStatus('grades-updated', err); throw err; }
+    $('grades-title').textContent = grades.exam.title + '：成績總表';
+    renderGradeOrder();
+    keepScroll(renderGrades);
+    liveStatus('grades-updated', null, '每 10 秒自動更新');
+  }
+
+  function renderGradeOrder() {
+    const g = grades.grade_order;
+    $('grades-order-file').closest('label').classList.toggle('hidden', !grades.owner);
+    $('grades-order-clear').classList.toggle('hidden', !g || !g.count);
+    if (!grades.owner) {
+      $('grades-order').textContent = '這場考試開放給多個班級或不限班級，匯出依班級、學號排序。';
+      return;
+    }
+    if (!g.count) {
+      $('grades-order').innerHTML = '匯出 Excel 的學生順序：<b>依學號</b>。上傳「' + esc(grades.owner) + '」的助教成績總表後，會照總表順序排列，整欄複製就能貼回總表。';
+      return;
+    }
+    const warn = [];
+    if (g.extra.length) warn.push('名單上有、總表沒有（會列在最下面）：' + g.extra.map(s => esc(s.name) + '（' + esc(s.student_id) + '）').join('、'));
+    if (g.missing.length) warn.push('總表上有、名單沒有（會留一列空白）：' + g.missing.map(esc).join('、'));
+    $('grades-order').innerHTML = '匯出 Excel 的學生順序：<b>依「' + esc(grades.owner) + '」成績總表（' + g.count + ' 人）</b>，從第 8 列開始，和總表同一列。' +
+      (warn.length ? '<br><span style="color:var(--ng)">' + warn.join('<br>') + '</span>' : '');
+  }
+
+  $('grades-order-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      grades.grade_order = await call('POST', '/api/admin/classes/' + encodeURIComponent(grades.owner) + '/grade-order', { data: await readBase64(e.target), filename: f.name });
+      renderGradeOrder();
+      say('grades-msg', '已記住「' + f.name + '」的學生順序，之後這個班的每場考試匯出都照這個順序', true);
+    } catch (err) { say('grades-msg', err.message); }
+    e.target.value = '';
+  });
+  $('grades-order-clear').addEventListener('click', async () => {
+    grades.grade_order = await call('DELETE', '/api/admin/classes/' + encodeURIComponent(grades.owner) + '/grade-order');
+    renderGradeOrder();
+  });
+
+  function renderGrades() {
+    const perQuestion = $('grades-mode').value === 'question';
+    $('grades-q').classList.toggle('hidden', !perQuestion);
+    $('grades-table-wrap').classList.toggle('hidden', perQuestion);
+    $('grades-sort').querySelector('[value=high]').textContent = perQuestion ? '本題得分高 → 低' : '成績高 → 低';
+    $('grades-sort').querySelector('[value=low]').textContent = perQuestion ? '本題得分低 → 高' : '成績低 → 高';
+    if (perQuestion) return renderQuestionView();
+    const g = grades;
+    const columns = {
+      name: { value: r => r.name }, student_id: { value: r => r.student_id }, started_at: { value: r => r.started_at },
+      submitted_at: { value: r => r.submitted_at }, seconds: { value: r => r.seconds }, score: { value: r => r.score },
+    };
+    g.questions.forEach((q, k) => { columns['q' + k] = { value: r => r.cells[k].score }; });
+    const rows = sortRows(g.rows, gradeSort, columns);
+    const head = '<tr>' + sortHead('name', '姓名', gradeSort) + sortHead('student_id', '學號', gradeSort) +
+      sortHead('started_at', '開始', gradeSort) + sortHead('submitted_at', '完成', gradeSort) + sortHead('seconds', '作答時間', gradeSort) +
+      sortHead('score', '成績/' + fmtNum(g.max_score), gradeSort, 'num') +
+      g.questions.map((q, k) => sortHead('q' + k, 'Q' + q.no + '<br><span class="muted">/' + fmtNum(q.points) + '</span>', gradeSort, 'num')).join('') + '</tr>';
+    const body = rows.map(r => '<tr><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
+      '<td>' + esc(r.student_id) + '</td><td>' + esc(fmtTime(r.started_at)) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td>' +
+      '<td>' + fmtSec(r.seconds) + '</td><td class="num"><b>' + fmtNum(r.score) + '</b></td>' +
+      r.cells.map(c => '<td class="num">' + MARK[c.state] + (c.score == null ? '' : ' ' + fmtNum(c.score)) + '</td>').join('') + '</tr>').join('');
+    const n = rows.length;
+    const avg = n ? '<tr class="avg-row"><td colspan="5">整體平均（' + n + ' 人）</td><td class="num">' + fmtNum(rows.reduce((s, r) => s + r.score, 0) / n) + '</td>' +
+      g.questions.map((q, k) => {
+        const sum = rows.reduce((s, r) => s + (r.cells[k].score || 0), 0);
+        return '<td class="num">' + fmtNum(sum / n) + '<br><span class="muted">' + Math.round(sum / n / (q.points || 1) * 100) + '%</span></td>';
+      }).join('') + '</tr>' : '';
+    $('grades-table').innerHTML = head + (body || '<tr><td colspan="' + (6 + g.questions.length) + '" class="muted">還沒有人交卷。</td></tr>') + avg;
+  }
+
+  // ── 逐題檢視：一次一題，列出每位學生的答案與得分；填充題每一格分開判斷 ──
+
+  function renderQuestionView() {
+    const g = grades;
+    if (!g.questions.length) { $('gq-table').innerHTML = '<tr><td class="muted">這場考試沒有題目。</td></tr>'; return; }
+    gq = Math.max(0, Math.min(gq, g.questions.length - 1));
+    const q = g.questions[gq], n = g.rows.length;
+    const rate = k => n ? Math.round(g.rows.reduce((s, r) => s + (r.cells[k].score || 0), 0) / n / (g.questions[k].points || 1) * 100) : 0;
+    $('gq-chips').innerHTML = g.questions.map((x, k) => '<button data-q="' + k + '" class="' + (k === gq ? 'active' : '') + '" title="' + esc(x.name) + '">Q' + x.no +
+      '<small>' + rate(k) + '%</small></button>').join('');
+    $('gq-prev').disabled = gq === 0;
+    $('gq-next').disabled = gq === g.questions.length - 1;
+    $('gq-no').textContent = '第 ' + q.no + ' 題';
+    $('gq-type').textContent = TYPE_TEXT[q.type];
+    $('gq-meta').textContent = q.name + '・配分 ' + fmtNum(q.points) + '・答對率 ' + rate(gq) + '%' + (q.case_sensitive ? '・區分大小寫' : '');
+    $('gq-stem').textContent = q.stem;
+    $('gq-code').textContent = q.code;
+    $('gq-code-wrap').classList.toggle('hidden', !q.code);
+    $('gq-code-wrap').open = q.type === 'fill';
+    $('gq-key').innerHTML = '<b>正確答案</b>　' + (q.type === 'fill'
+      ? q.answer.map((alts, b) => (q.answer.length > 1 ? '第 ' + (b + 1) + ' 格 ' : '') + alts.map(a => '<code>' + esc(a) + '</code>').join(' 或 ')).join('　')
+      : q.answer.map(i => '<code>' + LETTERS[i] + '. ' + esc(q.options[i]) + '</code>').join(' '));
+    const states = { right: 0, partial: 0, wrong: 0, blank: 0 };
+    g.rows.forEach(r => states[r.cells[gq].state]++);
+    const f = $('gq-filter').value;
+    const rows = sortRows(g.rows.filter(r => f === 'all' || r.cells[gq].state === f), gqSort, {
+      student_id: { value: r => r.student_id }, name: { value: r => r.name }, score: { value: r => r.cells[gq].score || 0 } });
+    $('gq-count').textContent = '答對 ' + states.right + '・部分 ' + states.partial + '・答錯 ' + states.wrong + '・未作答 ' + states.blank + '（共 ' + n + ' 人）';
+    const blanks = q.type === 'fill' ? q.answer.length : 0;
+    // 填充題每一格一行，直排在同一欄裡，格數再多也不用左右捲動
+    const blankLine = (b, k) => '<div class="blank-line ' + (b.ok ? 'ok' : 'ng') + '">' +
+      (blanks > 1 ? '<span class="blank-no">' + (k + 1) + '</span>' : '') + (b.ok ? '✓ ' : '✗ ') +
+      (b.text ? '<span class="blank-text">' + esc(b.text) + '</span>' : '<span class="muted">（空白）</span>') +
+      (!b.ok && b.text ? '<button class="btn ghost sm accept" data-accept-q="' + q.id + '" data-blank="' + k + '" data-text="' + esc(b.text) + '">算對</button>' : '') + '</div>';
+    const head = '<tr>' + sortHead('student_id', '學號', gqSort) + sortHead('name', '姓名', gqSort) + sortHead('score', '得分 / ' + fmtNum(q.points), gqSort, 'num') +
+      '<th>' + (blanks > 1 ? '學生答案（第 1～' + blanks + ' 格）' : '學生答案') + '</th></tr>';
+    $('gq-table').innerHTML = head + (rows.map(r => {
+      const c = r.cells[gq];
+      const answer = blanks
+        ? '<td class="blank-cell">' + c.blanks.map(blankLine).join('') + '</td>'
+        : '<td class="ans-text">' + MARK[c.state] + ' ' + (c.response ? esc(c.response) : '<span class="muted">未作答</span>') + '</td>';
+      return '<tr><td>' + esc(r.student_id) + '</td><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
+        '<td class="num">' + MARK[c.state] + ' ' + (c.score == null ? '0' : fmtNum(c.score)) + '</td>' + answer + '</tr>';
+    }).join('') || '<tr><td colspan="4" class="muted">沒有符合的學生</td></tr>');
+  }
+
+  $('gq-chips').addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (b) { gq = +b.dataset.q; renderQuestionView(); } });
+  $('gq-prev').addEventListener('click', () => { gq--; renderQuestionView(); });
+  $('gq-next').addEventListener('click', () => { gq++; renderQuestionView(); });
+  $('gq-filter').addEventListener('change', renderQuestionView);
+  $('gq-table').addEventListener('click', async e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(gqSort, th.dataset.sort); return renderQuestionView(); }
+    const a = e.target.closest('[data-attempt]');
+    if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); return; }
+    const t = e.target.closest('[data-accept-q]');
+    if (!t) return;
+    const same = grades.rows.filter(r => { const b = r.cells[gq].blanks[+t.dataset.blank]; return b && !b.ok && b.text.trim() === t.dataset.text.trim(); }).length;
+    if (!confirm('把第 ' + (+t.dataset.blank + 1) + ' 格的「' + t.dataset.text + '」也算對？\n這場有 ' + same + ' 人這樣寫，會加入題庫的可接受答案，並重新計算所有考過這題的分數。')) return;
+    try {
+      await call('POST', '/api/admin/questions/' + t.dataset.acceptQ + '/accept-fill', { question_id: +t.dataset.acceptQ, blank: +t.dataset.blank, text: t.dataset.text });
+      const keep = gq;
+      await loadGrades();
+      gq = keep;
+      renderGrades();
+      say('gq-msg', '已加入可接受答案並重新計分（' + same + ' 人）', true);
+    } catch (err) { say('gq-msg', err.message); }
+  });
+
+  $('grades-table').addEventListener('click', e => {
+    const th = e.target.closest('[data-sort]');
+    if (th) { toggleSort(gradeSort, th.dataset.sort); return renderGrades(); }
+    const a = e.target.closest('[data-attempt]');
+    if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); }
+  });
+
+  // ── 座位分析 ──
+
+  let seats = null;
+  const LEVEL_BADGE = ['<span class="badge gray">正常</span>', '<span class="badge warn">需要留意</span>', '<span class="badge ng">高度可疑</span>'];
+
+  $('mon-seats').addEventListener('click', () => loadSeats());
+  $('seats-back').addEventListener('click', e => { e.preventDefault(); openMonitor(monitorExam); });
+
+  async function loadSeats() {
+    show('seats');
+    $('seats-title').textContent = $('mon-title').textContent + '：座位分析';
+    $('seat-msg').textContent = '';
+    $('seat-compare-card').classList.add('hidden');
+    renderSeats(await call('GET', '/api/admin/exams/' + monitorExam + '/seats'));
+  }
+
+  $('seat-save').addEventListener('click', async () => {
+    try {
+      renderSeats(await call('PUT', '/api/admin/exams/' + monitorExam + '/seats', { seat_map: $('seat-map').value }));
+      $('seat-compare-card').classList.add('hidden');
+      say('seat-msg', '已儲存並重新分析', true);
+    } catch (err) { say('seat-msg', err.message); }
+  });
+  $('seat-prev').addEventListener('click', () => { $('seat-map').value = seats.previous.seat_map; $('seat-save').click(); });
+  $('seat-file').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    try {
+      renderSeats(await call('POST', '/api/admin/exams/' + monitorExam + '/seats/import', { data, filename: file.name }));
+      $('seat-compare-card').classList.add('hidden');
+      const n = seats.grid.flat().filter(c => c).length;
+      say('seat-msg', '已匯入「' + file.name + '」：' + seats.grid.length + ' 排、' + n + ' 個座位', true);
+    } catch (err) { say('seat-msg', err.message); }
+  });
+
+  function renderSeats(d) {
+    seats = d;
+    $('seat-map').value = d.seat_map;
+    $('seat-devices').innerHTML = d.devices.length
+      ? '這場考試記錄到的電腦代碼：<span style="font-family:var(--mono)">' + d.devices.map(esc).join('、') + '</span>' : '這場考試沒有學生設定電腦代碼，座位表請填學號。';
+    $('seat-prev').classList.toggle('hidden', !d.previous || !!d.seat_map);
+    $('seat-owner').innerHTML = d.owner ? '這是班級「<b>' + esc(d.owner) + '</b>」的座位表，在這裡修改會套用到這個班的每一場考試（也可以到「名單」頁編輯）。'
+      : '這場考試開放給多個班級或不限班級，座位表只存在這場考試。';
+    if (d.previous) $('seat-prev').textContent = '套用「' + d.previous.title + '」的座位表';
+    $('seat-result').classList.toggle('hidden', !d.grid.length);
+    if (!d.grid.length) return;
+    renderSeatGrid(d);
+    const flagged = d.pairs.filter(p => p.level).length;
+    $('seat-count').textContent = d.pairs.length + ' 組相鄰' + (flagged ? '，其中 ' + flagged + ' 組需要注意' : '，沒有發現異常');
+    $('seat-pairs').innerHTML = pairHead(true) + (d.pairs.map(p => pairRow(p, true)).join('') ||
+      '<tr><td colspan="7" class="muted">座位表上沒有兩位相鄰、都已交卷的學生。</td></tr>');
+    $('seat-others-card').classList.toggle('hidden', !d.others.length);
+    $('seat-others').innerHTML = pairHead(false) + d.others.map(p => pairRow(p, false)).join('');
+    const notes = [];
+    if (d.unmatched.length) notes.push('座位表上沒有交卷紀錄的座位（' + d.unmatched.length + '）：' + d.unmatched.map(esc).join('、') + '（缺考、學號或代碼打錯，或同一台電腦被另一位學生使用）');
+    if (d.unseated.length) notes.push('已交卷但不在座位表上：' + d.unseated.map(s => esc(s.name) + '（' + esc(s.student_id) + (s.device ? '，' + esc(s.device) : '') + '）').join('、'));
+    $('seat-notes').innerHTML = notes.join('<br>');
+  }
+
+  function renderSeatGrid(d) {
+    const R = d.grid.length, C = d.grid[0].length;
+    const conn = {};
+    d.pairs.forEach((p, i) => { if (p.level) conn[p.cells[0].join(',') + '|' + p.cells[1].join(',')] = { level: p.level, i }; });
+    const cols = [];
+    for (let c = 0; c < C; c++) { cols.push('auto'); if (c < C - 1) cols.push('14px'); }
+    const html = [];
+    for (let r = 0; r < R; r++) {
+      for (let c = 0; c < C; c++) {
+        html.push(seatCell(d.grid[r][c], r, c));
+        if (c < C - 1) html.push(connector('h', conn[r + ',' + c + '|' + r + ',' + (c + 1)]));
+      }
+      if (r < R - 1) for (let c = 0; c < C; c++) {
+        html.push(connector('v', conn[r + ',' + c + '|' + (r + 1) + ',' + c]));
+        if (c < C - 1) html.push('<div></div>');
+      }
+    }
+    $('seat-grid').style.gridTemplateColumns = cols.join(' ');
+    $('seat-grid').innerHTML = html.join('');
+  }
+
+  function seatCell(cell, r, c) {
+    if (!cell) return '<div class="seat aisle"></div>';
+    const pos = 'data-cell="' + r + ',' + c + '"';
+    if (!cell.student_id) return '<div class="seat unmatched" ' + pos + ' title="' + esc(cell.label) + '"><div class="pc">' + esc(cell.code) + '</div>' +
+      '<div class="nm">' + esc(cell.label.slice(cell.code.length).trim() || '—') + '</div><div class="sc">未交卷</div></div>';
+    return '<div class="seat' + (cell.level ? ' lv' + cell.level : '') + '" ' + pos + ' title="' + esc(cell.name + '（' + cell.student_id + '）') + '">' +
+      '<div class="pc">' + esc(cell.code) + '</div><div class="nm">' + esc(cell.name) + '</div>' +
+      '<div class="sc">' + fmtNum(cell.score) + ' / ' + fmtNum(cell.max_score) + '</div></div>';
+  }
+
+  function connector(dir, c) {
+    return '<div class="conn ' + dir + (c ? ' lv' + c.level + '" data-pair="' + c.i + '" title="點一下看逐題比對' : '') + '"></div>';
+  }
+
+  function pairHead(adjacent) {
+    return '<tr><th>判讀</th>' + (adjacent ? '<th>座位</th>' : '') + '<th>學生</th><th>錯成同一個答案</th><th>30 秒內作答相同</th><th>說明</th><th></th></tr>';
+  }
+
+  function pairRow(p, adjacent) {
+    const who = s => esc(s.name) + ' <span class="muted">' + esc(s.student_id) + (s.device ? '・' + esc(s.device) : '') + '</span>';
+    const idx = adjacent ? seats.pairs.indexOf(p) : -1;
+    return '<tr class="pair-row"' + (adjacent ? ' data-row="' + idx + '"' : '') + '>' +
+      '<td>' + LEVEL_BADGE[p.level] + '</td>' + (adjacent ? '<td>' + p.relation_text + '</td>' : '') +
+      '<td>' + who(p.a) + '<br>' + who(p.b) + '</td>' +
+      '<td><b>' + p.eeic + '</b> <span class="muted">/ 兩人都錯 ' + p.both_wrong + ' 題（碰巧約 ' + p.expected + '）</span></td>' +
+      '<td><b>' + p.sync + '</b> <span class="muted">題</span></td>' +
+      '<td style="white-space:normal;min-width:16rem">' + (p.reasons.map(esc).join('<br>') || '<span class="muted">在正常範圍內</span>') + '</td>' +
+      '<td><button class="btn ghost sm" data-compare="' + esc(p.a.student_id) + '|' + esc(p.b.student_id) + '">逐題比對</button></td></tr>';
+  }
+
+  function highlight(cells) {
+    document.querySelectorAll('.seat.hl').forEach(el => el.classList.remove('hl'));
+    (cells || []).forEach(c => { const el = document.querySelector('[data-cell="' + c.join(',') + '"]'); if (el) el.classList.add('hl'); });
+  }
+
+  $('seat-pairs').addEventListener('mouseover', e => {
+    const row = e.target.closest('[data-row]');
+    highlight(row ? seats.pairs[+row.dataset.row].cells : null);
+  });
+  $('seat-pairs').addEventListener('mouseleave', () => highlight(null));
+  $('seat-grid').addEventListener('click', e => {
+    const c = e.target.closest('[data-pair]');
+    if (c) { const p = seats.pairs[+c.dataset.pair]; compare(p.a.student_id, p.b.student_id, p.cells); }
+  });
+  ['seat-pairs', 'seat-others'].forEach(id => $(id).addEventListener('click', e => {
+    const b = e.target.closest('[data-compare]');
+    if (!b) return;
+    const [a, bb] = b.dataset.compare.split('|');
+    const row = b.closest('[data-row]');
+    compare(a, bb, row ? seats.pairs[+row.dataset.row].cells : null);
+  }));
+
+  async function compare(a, b, cells) {
+    highlight(cells);
+    const d = await call('GET', '/api/admin/exams/' + monitorExam + '/compare?a=' + encodeURIComponent(a) + '&b=' + encodeURIComponent(b));
+    $('seat-compare-title').textContent = '逐題比對：' + d.a.name + '（' + d.a.student_id + '）vs ' + d.b.name + '（' + d.b.student_id + '）';
+    const ans = s => s.text ? esc(s.text) + (s.score != null ? ' <span class="muted">' + fmtNum(s.score) + '</span>' : '') : '<span class="muted">未作答</span>';
+    $('seat-compare').innerHTML = '<tr><th>題號</th><th>題目</th><th>' + esc(d.a.name) + '</th><th>' + esc(d.b.name) + '</th><th>正解</th><th>作答時間差</th></tr>' +
+      d.questions.map(q => '<tr class="' + (q.same_wrong ? 'same-wrong' : q.same && q.gap_seconds != null && q.gap_seconds <= 30 ? 'same-sync' : '') + '">' +
+        '<td>' + q.no + '</td><td title="' + esc(q.stem) + '">' + esc(q.stem.length > 26 ? q.stem.slice(0, 26) + '…' : q.stem) + '</td>' +
+        '<td>' + ans(q.a) + '</td><td>' + ans(q.b) + '</td><td class="muted">' + esc(q.answer) + '</td>' +
+        '<td>' + (q.gap_seconds != null ? q.gap_seconds + ' 秒' : '') + '</td></tr>').join('');
+    $('seat-compare-card').classList.remove('hidden');
+    $('seat-compare-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 
   // ── 各題分析 ──
 
@@ -565,7 +1412,7 @@
     const f = $('q-filter').value;
     const list = questions.filter(q => qMatches(q, f));
     $('q-table').innerHTML = '<tr><th>#</th><th>題型</th><th>題幹</th><th>答案</th><th>分數</th><th>標籤</th><th></th></tr>' +
-      list.map(q => '<tr><td>' + q.id + '</td><td>' + TYPE_TEXT[q.type] + (q.type === 'multi' && q.multi_mode === 'partial' ? '（部分給分）' : '') + '</td>' +
+      list.map(q => '<tr><td>' + q.id + '</td><td>' + TYPE_TEXT[q.type] + (q.type !== 'multi' ? '' : q.multi_mode === 'partial' ? '（部分給分）' : q.multi_mode === 'weighted' ? '（倒扣）' : '') + '</td>' +
         '<td>' + esc(q.stem.slice(0, 100)) + '</td><td>' + esc(answerText(q)) + '</td><td>' + q.points + '</td>' +
         '<td>' + esc(q.tags) + '</td><td class="row"><button class="btn ghost sm" data-qedit="' + q.id + '">編輯</button>' +
         '<button class="btn danger sm" data-qdel="' + q.id + '">刪除</button></td></tr>').join('');
@@ -573,13 +1420,21 @@
 
   $('q-filter').addEventListener('input', renderQuestions);
   $('new-q').addEventListener('click', () => openQForm(null));
-  $('cancel-q').addEventListener('click', () => $('q-form').classList.add('hidden'));
+  $('cancel-q').addEventListener('click', closeQForm);
+  function closeQForm() {
+    $('q-form').classList.add('hidden');
+    setHash('questions');
+    updateTitle();
+  }
   $('q-type').addEventListener('change', syncQType);
+  $('q-multi').addEventListener('change', syncQType);
 
   function syncQType() {
     const t = $('q-type').value;
     $('q-opt-wrap').classList.toggle('hidden', t === 'fill');
     $('q-multi-wrap').classList.toggle('hidden', t !== 'multi');
+    $('q-weights-wrap').classList.toggle('hidden', t !== 'multi' || $('q-multi').value !== 'weighted');
+    $('q-case-wrap').classList.toggle('hidden', t !== 'fill');
     $('q-answer-label').textContent = {
       single: '正確答案（一個字母，例如 B）',
       multi: '正確答案（用分號分隔，例如 A;C）',
@@ -588,12 +1443,15 @@
   }
 
   function openQForm(id) {
+    setHash(id ? 'question/' + id + '/edit' : 'questions/new');
     editingQ = id;
     const q = id ? questions.find(x => x.id === id) : { type: 'single', stem: '', code: '', options: [], answer: [], explanation: '', points: 1, multi_mode: 'all', tags: '' };
     $('q-form-title').textContent = id ? '編輯題目 #' + id : '新增題目';
     $('q-type').value = q.type;
     $('q-points').value = q.points;
     $('q-multi').value = q.multi_mode;
+    $('q-weights').value = (q.weights || []).map(w => +w.toFixed(4)).join(';');
+    $('q-case').checked = !!q.case_sensitive;
     $('q-tags').value = q.tags;
     $('q-stem').value = q.stem;
     $('q-code').value = q.code;
@@ -618,11 +1476,13 @@
       options: $('q-options').value.split('\n').map(s => s.trim()).filter(Boolean),
       answer, explanation: $('q-explain').value, points: +$('q-points').value,
       multi_mode: $('q-multi').value, tags: $('q-tags').value,
+      weights: $('q-multi').value === 'weighted' ? $('q-weights').value.split(/[;,\s]+/).filter(Boolean).map(Number) : [],
+      case_sensitive: $('q-case').checked,
     };
     try {
       if (editingQ) await call('PUT', '/api/admin/questions/' + editingQ, body);
       else await call('POST', '/api/admin/questions', body);
-      $('q-form').classList.add('hidden');
+      closeQForm();
       say('q-msg', editingQ ? '已更新，考過這題的分數已重新計算' : '已新增', true);
       loadQuestions();
     } catch (err) {
@@ -650,27 +1510,207 @@
     e.target.value = '';
   });
 
-  // ── 名單 ──
+  // ── 操作日誌 ──
+
+  let logRows = [];
+  let logTimer = null;
+
+  async function loadLogs(more) {
+    const params = new URLSearchParams({ limit: 100, q: $('log-q').value, action: $('log-action').value });
+    if (more && logRows.length) params.set('before', logRows[logRows.length - 1].id);
+    const d = await call('GET', '/api/admin/logs?' + params);
+    logRows = more ? logRows.concat(d.rows) : d.rows;
+    const current = $('log-action').value;
+    $('log-action').innerHTML = '<option value="">所有動作</option>' + d.actions.map(a => '<option' + (a === current ? ' selected' : '') + '>' + esc(a) + '</option>').join('');
+    $('log-more').classList.toggle('hidden', d.rows.length < 100);
+    renderLogs();
+  }
+
+  function logValue(v) {
+    if (v == null || v === '') return '（空）';
+    const text = typeof v === 'string' ? v : JSON.stringify(v);
+    return text.length > 120 ? text.slice(0, 120) + '…' : text;
+  }
+
+  function logDetail(detail) {
+    const keys = Object.keys(detail || {});
+    if (!keys.length) return '';
+    const isDiff = keys.every(k => Array.isArray(detail[k]) && detail[k].length === 2);
+    const body = isDiff
+      ? '<ul class="diff">' + keys.map(k => '<li><b>' + esc(k) + '</b>：<del>' + esc(logValue(detail[k][0])) + '</del> → <ins>' + esc(logValue(detail[k][1])) + '</ins></li>').join('') + '</ul>'
+      : '<pre>' + esc(JSON.stringify(detail, null, 2)) + '</pre>';
+    return '<details><summary>' + (isDiff ? '修改內容（' + keys.length + ' 項）' : '詳細內容') + '</summary>' + body + '</details>';
+  }
+
+  function renderLogs() {
+    const when = iso => { const d = new Date(iso); return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':'); };
+    $('log-table').innerHTML = '<tr><th>時間</th><th>動作</th><th>對象</th><th>內容</th><th>來源</th><th>結果</th></tr>' +
+      (logRows.map(r => '<tr class="' + (r.status >= 400 ? 'log-fail' : '') + '">' +
+        '<td class="when">' + when(r.at) + '</td><td>' + esc(r.action) + '</td><td>' + esc(r.target) + '</td>' +
+        '<td>' + esc(r.summary) + logDetail(r.detail) + '</td>' +
+        '<td class="src">' + (r.actor === '後台' ? '' : '<b>' + esc(r.actor) + '</b><br>') + (r.ip ? esc(r.ip) : '') +
+        (r.device ? '<br>' + esc(r.device) : '') + (r.session ? '<br>工作階段 <code>' + esc(r.session) + '</code>' : '') + '</td>' +
+        '<td>' + (r.status >= 400 ? '<span class="badge ng">失敗 ' + r.status + '</span>' : '<span class="badge ok">成功</span>') + '</td></tr>').join('') ||
+        '<tr><td colspan="6" class="muted">沒有紀錄</td></tr>');
+  }
+
+  $('log-q').addEventListener('input', () => { clearTimeout(logTimer); logTimer = setTimeout(() => loadLogs(), 300); });
+  $('log-action').addEventListener('change', () => loadLogs());
+  $('log-more').addEventListener('click', () => loadLogs(true));
+
+  // ── 名單與班級 ──
+
+  let classes = { classes: [], unassigned: 0, total: 0 };
+  let students = [];
+  let currentClass = null;     // null = 全部、'' = 未分班、其他 = 班級名稱
+  let editingStudent = null;
 
   async function loadStudents() {
-    const list = await call('GET', '/api/admin/students');
-    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>密碼</th><th></th></tr>' +
-      list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
-        '<td>' + (s.has_password ? '<span class="badge ok">已設定</span>' : '<span class="badge gray">未設定</span>') + '</td>' +
-        '<td class="row">' + (s.has_password ? '<button class="btn ghost sm" data-spw="' + esc(s.student_id) + '" data-name="' + esc(s.name) + '">重設密碼</button>' : '') +
-        '<button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('');
-    say('s-msg', '共 ' + list.length + ' 人', true);
+    [classes, students] = await Promise.all([call('GET', '/api/admin/classes'), call('GET', '/api/admin/students')]);
+    if (currentClass && !classes.classes.some(c => c.name === currentClass)) currentClass = null;
+    renderClasses();
+    renderStudents();
   }
+
+  const classInfo = name => classes.classes.find(c => c.name === name);
+
+  function renderClasses() {
+    const tab = (value, label, n) => '<button data-class="' + esc(value) + '" class="' + (currentClass === value ? 'active' : '') + '">' +
+      esc(label) + '<span class="n">' + n + '</span></button>';
+    $('class-tabs').innerHTML = '<button data-class="__all" class="' + (currentClass === null ? 'active' : '') + '">全部<span class="n">' + classes.total + '</span></button>' +
+      classes.classes.map(c => tab(c.name, c.name, c.students)).join('') +
+      (classes.unassigned ? tab('', '未分班', classes.unassigned) : '');
+    const c = currentClass ? classInfo(currentClass) : null;
+    $('class-card').classList.toggle('hidden', !c);
+    if (c) {
+      $('class-title').textContent = c.name;
+      $('class-info').textContent = c.students + ' 位學生・座位表' + (c.seats ? '已設定 ' + c.seats + ' 個座位' : '尚未設定') +
+        '・開放給這班的考試 ' + c.exams + ' 場';
+    } else {
+      $('class-seats').classList.add('hidden');
+    }
+    $('s-class').innerHTML = '<option value="">（未分班）</option>' +
+      classes.classes.map(c => '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>').join('');
+    if (!editingStudent) $('s-class').value = currentClass || '';
+    $('import-target').textContent = currentClass ? '→ 匯入到「' + currentClass + '」' : '→ 依檔案裡的班級欄（沒有就是未分班）';
+    $('s-replace-text').textContent = currentClass ? '先清除「' + currentClass + '」的舊名單' : '先清除所有舊名單';
+  }
+
+  function renderStudents() {
+    const q = $('s-search').value.trim().toLowerCase();
+    const list = students.filter(s => (currentClass === null || s.class_name === currentClass) &&
+      (!q || (s.student_id + ' ' + s.name).toLowerCase().includes(q)));
+    const options = cls => '<option value="">（未分班）</option>' + classes.classes.map(c =>
+      '<option value="' + esc(c.name) + '"' + (c.name === cls ? ' selected' : '') + '>' + esc(c.name) + '</option>').join('');
+    $('s-table').innerHTML = '<tr><th>學號</th><th>姓名</th><th>班級</th><th>密碼</th><th></th></tr>' +
+      (list.map(s => '<tr><td>' + esc(s.student_id) + '</td><td>' + esc(s.name) + '</td>' +
+        '<td><select class="inline-select" data-move="' + esc(s.student_id) + '">' + options(s.class_name) + '</select></td>' +
+        '<td>' + (s.has_password ? '<span class="badge ok">已設定</span>' : '<span class="badge gray">未設定</span>') + '</td>' +
+        '<td class="row"><button class="btn ghost sm" data-sedit="' + esc(s.student_id) + '">編輯</button>' +
+        (s.has_password ? '<button class="btn ghost sm" data-spw="' + esc(s.student_id) + '" data-name="' + esc(s.name) + '">重設密碼</button>' : '') +
+        '<button class="btn danger sm" data-sdel="' + esc(s.student_id) + '">刪除</button></td></tr>').join('') ||
+        '<tr><td colspan="5" class="muted">沒有學生</td></tr>');
+    $('s-count').textContent = list.length + ' 人';
+  }
+
+  $('s-search').addEventListener('input', renderStudents);
+  $('class-tabs').addEventListener('click', e => {
+    const b = e.target.closest('[data-class]');
+    if (!b) return;
+    currentClass = b.dataset.class === '__all' ? null : b.dataset.class;
+    $('class-seats').classList.add('hidden');
+    cancelEdit();
+    renderClasses();
+    renderStudents();
+  });
+
+  $('new-class').addEventListener('click', async () => {
+    const name = prompt('新班級名稱（例如 資管一甲）');
+    if (!name) return;
+    try {
+      const r = await call('POST', '/api/admin/classes', { name });
+      currentClass = r.name;
+      await loadStudents();
+      say('s-msg', '已新增「' + r.name + '」，可以匯入名單或逐一新增學生', true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('class-rename').addEventListener('click', async () => {
+    const name = prompt('把「' + currentClass + '」改名為', currentClass);
+    if (!name || name === currentClass) return;
+    try {
+      const r = await call('PUT', '/api/admin/classes/' + encodeURIComponent(currentClass), { name });
+      currentClass = r.name;
+      await loadStudents();
+      say('s-msg', '已改名；學生與考試的開放班級都一起更新', true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('class-delete').addEventListener('click', async () => {
+    const c = classInfo(currentClass);
+    const ok = await ask('刪除班級「' + c.name + '」',
+      '<p>這個班有 ' + c.students + ' 位學生' + (c.exams ? '，' + c.exams + ' 場考試開放給這個班（會改成不限班級，請記得重新設定）' : '') + '。</p>' +
+      '<label class="check"><input type="radio" name="del-mode" value="keep" checked> 學生保留，移到「未分班」</label><br>' +
+      '<label class="check"><input type="radio" name="del-mode" value="delete"> 連學生一起刪除（有作答紀錄的會保留在未分班）</label>',
+      '刪除班級', '取消');
+    if (!ok) return;
+    const mode = document.querySelector('[name=del-mode]:checked').value;
+    try {
+      const r = await call('DELETE', '/api/admin/classes/' + encodeURIComponent(c.name) + '?students=' + mode);
+      currentClass = null;
+      await loadStudents();
+      say('s-msg', '已刪除班級' + (r.deleted ? '，刪除 ' + r.deleted + ' 位學生' : '') + (r.unassigned ? '，' + r.unassigned + ' 位移到未分班' : ''), true);
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  // 學生：新增／編輯（同一個表單）、改班、重設密碼、刪除
+  function cancelEdit() {
+    editingStudent = null;
+    $('s-form-title').textContent = '新增學生';
+    $('add-s').textContent = '新增';
+    $('s-id').readOnly = false;
+    $('s-id').value = $('s-name').value = '';
+    $('cancel-s').classList.add('hidden');
+    $('s-class').value = currentClass || '';
+  }
+  $('cancel-s').addEventListener('click', cancelEdit);
 
   $('add-s').addEventListener('click', async () => {
     try {
-      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value });
-      $('s-id').value = $('s-name').value = '';
+      await call('POST', '/api/admin/students', { student_id: $('s-id').value, name: $('s-name').value, class_name: $('s-class').value });
+      say('s-msg', (editingStudent ? '已更新 ' : '已新增 ') + $('s-id').value.trim(), true);
+      cancelEdit();
+      loadStudents();
+    } catch (err) { say('s-msg', err.message); }
+  });
+
+  $('s-table').addEventListener('change', async e => {
+    const sid = e.target.dataset.move;
+    if (!sid) return;
+    const s = students.find(x => x.student_id === sid);
+    try {
+      await call('POST', '/api/admin/students', { student_id: sid, name: s.name, class_name: e.target.value });
+      say('s-msg', s.name + ' 改到「' + (e.target.value || '未分班') + '」', true);
       loadStudents();
     } catch (err) { say('s-msg', err.message); }
   });
 
   $('s-table').addEventListener('click', async e => {
+    const edit = e.target.dataset.sedit;
+    if (edit) {
+      const s = students.find(x => x.student_id === edit);
+      editingStudent = edit;
+      $('s-form-title').textContent = '編輯學生';
+      $('add-s').textContent = '儲存';
+      $('s-id').value = s.student_id;
+      $('s-id').readOnly = true;
+      $('s-name').value = s.name;
+      $('s-class').value = s.class_name;
+      $('cancel-s').classList.remove('hidden');
+      $('s-name').focus();
+      $('s-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     const reset = e.target.dataset.spw;
     if (reset && confirm('清除「' + e.target.dataset.name + '」的密碼？清除後只輸入學號就能登入，學生可以再自己設定新密碼。')) {
       try { await call('POST', '/api/admin/students/' + encodeURIComponent(reset) + '/reset-password'); loadStudents(); }
@@ -696,16 +1736,125 @@
   $('s-file').addEventListener('change', async e => {
     const f = e.target.files[0];
     if (!f) return;
-    const opts = { replace: $('s-replace').checked };
+    const opts = { replace: $('s-replace').checked, class_name: currentClass || '' };
     try {
       const r = /\.xlsx$/i.test(f.name)
         ? await call('POST', '/api/admin/students/import-xlsx', Object.assign({ data: await readBase64(e.target) }, opts))
         : await call('POST', '/api/admin/students/import', Object.assign({ csv: await readFile(e.target) }, opts));
       await loadStudents();
-      say('s-msg', '匯入 ' + r.count + ' 人', true);
+      say('s-msg', '匯入 ' + r.count + ' 人' + (currentClass ? '到「' + currentClass + '」' : ''), true);
     } catch (err) { say('s-msg', err.message); }
     e.target.value = '';
   });
 
-  if (token) openTab('exams'); else show('login');
+  // 班級座位表
+  $('class-seats-btn').addEventListener('click', async () => {
+    renderClassSeats(await call('GET', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats'));
+    $('class-seat-msg').textContent = '';
+    $('class-seats').classList.remove('hidden');
+    $('class-seats').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $('class-seat-close').addEventListener('click', () => $('class-seats').classList.add('hidden'));
+  $('class-seat-save').addEventListener('click', async () => {
+    try {
+      renderClassSeats(await call('PUT', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats', { seat_map: $('class-seat-map').value }));
+      say('class-seat-msg', '已儲存', true);
+      loadStudents();
+    } catch (err) { say('class-seat-msg', err.message); }
+  });
+  $('class-seat-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const d = await call('POST', '/api/admin/classes/' + encodeURIComponent(currentClass) + '/seats/import', { data: await readBase64(e.target), filename: f.name });
+      renderClassSeats(d);
+      const n = d.grid.flat().filter(x => x).length;
+      say('class-seat-msg', '已匯入「' + f.name + '」：' + d.grid.length + ' 排、' + n + ' 個座位', true);
+      loadStudents();
+    } catch (err) { say('class-seat-msg', err.message); }
+    e.target.value = '';
+  });
+
+  function renderClassSeats(d) {
+    $('class-seats-name').textContent = d.name;
+    $('class-seat-map').value = d.seat_map;
+    const C = d.grid.length ? d.grid[0].length : 0;
+    $('class-seat-grid').style.gridTemplateColumns = 'repeat(' + C + ', auto)';
+    $('class-seat-grid').style.gap = '8px';
+    $('class-seat-grid').innerHTML = d.grid.map(row => row.map(c => !c ? '<div class="seat aisle" style="width:92px"></div>' :
+      '<div class="seat' + (c.known ? '' : ' unknown') + '" title="' + esc(c.label) + '"><div class="pc">' + esc(c.code) + '</div>' +
+      '<div class="nm">' + esc(c.name || '—') + '</div>' + (c.known ? '' : '<div class="sc">名單上沒有</div>') + '</div>').join('')).join('');
+    const notes = [];
+    if (d.unknown.length) notes.push('<span style="color:var(--ng)">名單上找不到的學號（' + d.unknown.length + '）：' + d.unknown.map(esc).join('、') + '</span>');
+    if (d.unseated.length) notes.push('名單上有、但沒排座位（' + d.unseated.length + '）：' + d.unseated.map(s => esc(s.name) + '（' + esc(s.student_id) + '）').join('、'));
+    $('class-seat-notes').innerHTML = notes.join('<br>');
+  }
+
+  // ── 管理員帳號 ──
+
+  async function loadAdmins() {
+    const list = await call('GET', '/api/admin/admins');
+    const when = iso => iso ? fmtTime(iso) : '—';
+    const roleSelect = a => '<select class="inline-select" data-ad-role="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '"' +
+      (me && a.account === me.account ? ' disabled' : '') + '>' + Object.entries(ROLE_TEXT).map(([v, t]) => '<option value="' + v + '"' + (a.role === v ? ' selected' : '') + '>' + t + '</option>').join('') + '</select>';
+    $('ad-table').innerHTML = '<tr><th>帳號</th><th>姓名</th><th>權限</th><th>狀態</th><th>最後登入</th><th>建立時間</th><th></th></tr>' +
+      (list.map(a => '<tr><td>' + esc(a.account) + '</td><td>' + esc(a.name) + '</td><td>' + roleSelect(a) + '</td>' +
+        '<td>' + (a.disabled ? '<span class="badge ng">已停用</span>' : a.must_change ? '<span class="badge warn">尚未改預設密碼</span>' : '<span class="badge ok">使用中</span>') + '</td>' +
+        '<td>' + when(a.last_login) + '</td><td>' + when(a.created_at) + '</td>' +
+        '<td class="row">' + (me && a.account === me.account ? '<span class="muted">（你自己）</span>' :
+          '<button class="btn ghost sm" data-ad-rename="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '">改姓名</button>' +
+          '<button class="btn ghost sm" data-ad-reset="' + esc(a.account) + '">重設密碼</button>' +
+          '<button class="btn ghost sm" data-ad-toggle="' + esc(a.account) + '" data-name="' + esc(a.name) + '" data-disabled="' + (a.disabled ? 1 : 0) + '">' + (a.disabled ? '啟用' : '停用') + '</button>' +
+          '<button class="btn danger sm" data-ad-del="' + esc(a.account) + '">刪除</button>') + '</td></tr>').join('') ||
+        '<tr><td colspan="7" class="muted">還沒有管理員帳號。</td></tr>');
+  }
+
+  const ROLE_TEXT = { admin: '一般管理員', owner: '最高管理員' };
+
+  $('ad-table').addEventListener('change', async e => {
+    const d = e.target.dataset;
+    if (!d.adRole) return;
+    const role = e.target.value;
+    if (!confirm('把「' + d.adRole + '」改為' + ROLE_TEXT[role] + '？')) { loadAdmins(); return; }
+    try {
+      await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adRole), { name: d.name, disabled: d.disabled === '1', role });
+      say('ad-msg', '已改為' + ROLE_TEXT[role], true);
+    } catch (err) { say('ad-msg', err.message); }
+    loadAdmins();
+  });
+
+  $('ad-add').addEventListener('click', async () => {
+    try {
+      await call('POST', '/api/admin/admins', { account: $('ad-account').value, name: $('ad-name').value, role: $('ad-role').value });
+      say('ad-msg', '已新增「' + $('ad-account').value.trim() + '」，請告訴對方用預設密碼登入，第一次登入會要求改密碼', true);
+      $('ad-account').value = $('ad-name').value = '';
+      loadAdmins();
+    } catch (err) { say('ad-msg', err.message); }
+  });
+
+  $('ad-table').addEventListener('click', async e => {
+    const t = e.target, d = t.dataset;
+    try {
+      if (d.adRename) {
+        const name = prompt('「' + d.adRename + '」的姓名', d.name);
+        if (name == null) return;
+        await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adRename), { name, disabled: d.disabled === '1' });
+      } else if (d.adReset) {
+        if (!confirm('把「' + d.adReset + '」的密碼改回預設密碼？對方目前的登入會失效，下次登入要重新設定密碼。')) return;
+        await call('POST', '/api/admin/admins/' + encodeURIComponent(d.adReset) + '/reset-password');
+        say('ad-msg', '已改回預設密碼', true);
+      } else if (d.adToggle) {
+        const disable = d.disabled !== '1';
+        if (disable && !confirm('停用「' + d.adToggle + '」？對方會立即被登出，之後不能登入。')) return;
+        await call('PUT', '/api/admin/admins/' + encodeURIComponent(d.adToggle), { name: d.name, disabled: disable });
+      } else if (d.adDel) {
+        if (!confirm('刪除管理員帳號「' + d.adDel + '」？日誌裡的紀錄會保留。')) return;
+        await call('DELETE', '/api/admin/admins/' + encodeURIComponent(d.adDel));
+      } else return;
+      loadAdmins();
+    } catch (err) { say('ad-msg', err.message); }
+  });
+
+  if (token) loadMe().then(m => { if (m && m.must_change) { show('exams'); forcePasswordChange(); } else route(); });
+  else show('login');
 })();

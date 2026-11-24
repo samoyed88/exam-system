@@ -89,6 +89,7 @@
         <div class="nav-title"><span>測驗導覽</span><span class="muted" id="progress"></span></div>
         <div class="nav-grid" data-grid></div>
         <div class="legend"><span><i class="done"></i>已作答</span><span><i></i>未作答</span><span><i class="flag"></i>已標記</span></div>
+        <div class="guard-count hidden" data-guard-count></div>
         <button class="btn block" data-finish>完成作答…</button>
         <div class="save-state" data-save></div>
       </div>
@@ -128,6 +129,15 @@
     <aside class="quiz-nav" id="result-nav"></aside>
   </div>
 </section>
+
+<!-- 離開考試畫面的警告／鎖定／全螢幕提示：蓋住整個作答畫面 -->
+<div class="guard hidden" id="guard" role="alertdialog" aria-modal="true" aria-labelledby="guard-title">
+  <div class="guard-box">
+    <h2 id="guard-title"></h2>
+    <div id="guard-body"></div>
+    <div class="row" style="justify-content:center;margin-top:1.25rem"><button class="btn lg" id="guard-ok"></button></div>
+  </div>
+</div>
 
 <div class="modal hidden" id="modal">
   <div class="modal-box">

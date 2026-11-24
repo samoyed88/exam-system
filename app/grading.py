@@ -1,13 +1,26 @@
-"""評分規則：單選、多選（全對或學測式部分給分）、填充（每格獨立、寬鬆比對）。"""
+"""評分規則：單選、多選（全對、學測式部分給分、或依選項比重可倒扣）、填充（每格獨立、寬鬆比對）。"""
 import re
 import unicodedata
 from fractions import Fraction
 
 
-def normalize(text: str) -> str:
-    # NFKC 會把全形英數、全形空白轉半形；再把連續空白壓成一個並轉小寫
-    text = unicodedata.normalize("NFKC", str(text)).strip()
-    return re.sub(r"\s+", " ", text).casefold()
+def normalize(text: str, fold: bool = True) -> str:
+    # NFKC 會把全形英數、全形空白轉半形；連續空白壓成一個，fold 時轉小寫。
+    # 符號旁邊的空白不影響程式碼的意思（students[0] = 5 和 students[0]=5 相同），一律去掉；
+    # 兩個英數字之間的空白要保留（double students 不能變成 doublestudents）
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(text)).strip())
+    text = re.sub(r"(?<=[^\w\s])\s+|\s+(?=[^\w\s])", "", text)
+    return text.casefold() if fold else text
+
+
+def statement_blanks(code: str, count: int) -> list[bool]:
+    """程式碼裡哪些空格是「獨立一行、後面接分號」的敘述（例如「   【3】 ; //設定…」）。
+    這種空格學生多打一個分號，放回去變成 ;; 仍能編譯，可以算對；for(…)、println(…) 裡的空格不行。"""
+    return [bool(re.search(rf"^\s*【{k}】\s*;", code or "", re.M)) for k in range(1, count + 1)]
+
+
+def strip_statement_semicolon(response: str) -> str:
+    return re.sub(r"[\s;]+$", "", response) if response.rstrip().endswith(";") else response
 
 
 # 只認一般小數與分數。Fraction 也吃 1e999999999 這種指數寫法，展開要算好幾小時，
@@ -25,13 +38,13 @@ def as_number(text: str):
         return None
 
 
-def fill_match(response: str, accepted: list[str]) -> bool:
-    got = normalize(response)
+def fill_match(response: str, accepted: list[str], case_sensitive: bool = False) -> bool:
+    got = normalize(response, not case_sensitive)
     if not got:
         return False
     got_num = as_number(got)
     for ans in accepted:
-        want = normalize(ans)
+        want = normalize(ans, not case_sensitive)
         if got == want:
             return True
         want_num = as_number(want)
@@ -41,7 +54,8 @@ def fill_match(response: str, accepted: list[str]) -> bool:
 
 
 def grade(qtype: str, answer, response, points: float,
-          multi_mode: str = "all", num_options: int = 0) -> float:
+          multi_mode: str = "all", num_options: int = 0, weights: list[float] | None = None,
+          case_sensitive: bool = False, statement: list[bool] | None = None) -> float:
     """回傳這題得分；response 為 None 代表沒作答。"""
     if response is None:
         return 0.0
@@ -51,6 +65,10 @@ def grade(qtype: str, answer, response, points: float,
         if not isinstance(response, list):
             return 0.0
         picked, correct = set(response), set(answer)
+        if weights:
+            # Moodle 規則：選到的選項比重加總（錯的選項是負數，會倒扣），介於 0 到滿分
+            total = sum(weights[i] for i in picked if 0 <= i < len(weights))
+            return round(points * max(0.0, min(1.0, total)), 4)
         if multi_mode == "all":
             return float(points) if picked == correct else 0.0
         # 學測規則：n 個選項錯 k 個得 (n - 2k) / n，最低 0
@@ -62,9 +80,12 @@ def grade(qtype: str, answer, response, points: float,
         if not isinstance(response, list) or not answer:
             return 0.0
         per_blank = points / len(answer)
+        statement = statement or []
         hits = sum(
             1 for i, accepted in enumerate(answer)
-            if i < len(response) and fill_match(response[i], accepted)
+            if i < len(response) and fill_match(
+                strip_statement_semicolon(response[i]) if i < len(statement) and statement[i] else response[i],
+                accepted, case_sensitive)
         )
         return round(per_blank * hits, 4)
     return 0.0
