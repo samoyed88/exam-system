@@ -248,7 +248,7 @@
   <div class="crumbs"><a href="#" data-back>考試</a> / <a href="#" id="grades-back">考場監控</a> / 成績總表</div>
   <div class="toolbar">
     <h1 id="grades-title"></h1>
-    <label class="inline-field">顯示<select id="grades-mode"><option value="score">每題得分</option><option value="response">作答內容</option></select></label>
+    <label class="inline-field">顯示<select id="grades-mode"><option value="question">逐題檢視</option><option value="score">總表（每題得分）</option></select></label>
     <label class="inline-field">排序<select id="grades-sort"><option value="id">學號</option><option value="high">成績高 → 低</option><option value="low">成績低 → 高</option></select></label>
     <button class="btn sm" id="grades-xlsx">匯出 Excel</button>
   </div>
@@ -262,7 +262,26 @@
     </div>
     <div class="msg" id="grades-msg"></div>
   </div>
-  <div class="table-wrap scroll-table grades-wrap"><table id="grades-table"></table></div>
+  <div class="table-wrap scroll-table grades-wrap" id="grades-table-wrap"><table id="grades-table"></table></div>
+  <div id="grades-q" class="hidden">
+    <div class="q-nav">
+      <button class="btn ghost sm" id="gq-prev">← 上一題</button>
+      <div class="q-chips" id="gq-chips"></div>
+      <button class="btn ghost sm" id="gq-next">下一題 →</button>
+    </div>
+    <div class="card">
+      <div class="q-head"><span class="q-num" id="gq-no"></span><span class="badge" id="gq-type"></span><span class="muted" id="gq-meta"></span></div>
+      <div class="q-stem" id="gq-stem"></div>
+      <details id="gq-code-wrap"><summary class="muted" style="cursor:pointer">程式碼</summary><pre id="gq-code"></pre></details>
+      <div class="gq-key" id="gq-key"></div>
+    </div>
+    <div class="toolbar" style="border:none;padding:0;margin:.25rem 0 .6rem">
+      <label class="inline-field">篩選<select id="gq-filter"><option value="all">全部</option><option value="right">答對</option><option value="partial">部分得分</option><option value="wrong">答錯</option><option value="blank">未作答</option></select></label>
+      <span class="muted" id="gq-count"></span>
+    </div>
+    <div class="msg" id="gq-msg"></div>
+    <div class="table-wrap scroll-table gq-wrap"><table id="gq-table"></table></div>
+  </div>
 </section>
 
 <!-- 座位分析 -->

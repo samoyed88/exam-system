@@ -1939,8 +1939,16 @@ def exam_gradebook(exam_id: int, db=Depends(get_db)):
         for q in qs:
             r = answers[a["id"]].get(q["id"])
             resp = json.loads(r["response"]) if r else None
-            cells.append({"score": r["score"] if r else None, "state": answer_state(q, r),
-                          "response": response_detail(q, resp)})
+            cell = {"score": r["score"] if r else None, "state": answer_state(q, r),
+                    "response": response_detail(q, resp)}
+            if q["type"] == "fill":
+                # 逐題檢視：每一格的寫法與對錯
+                key = json.loads(q["answer"])
+                got = resp if isinstance(resp, list) else []
+                cell["blanks"] = [{"text": got[i] if i < len(got) else "",
+                                   "ok": i < len(got) and fill_match(got[i], key[i], bool(q["case_sensitive"]))}
+                                  for i in range(len(key))]
+            cells.append(cell)
         rows.append({"attempt_id": a["id"], "student_id": a["student_id"], "name": a["name"] or "",
                      "class_name": a["class_name"] or "", "started_at": a["started_at"],
                      "submitted_at": a["submitted_at"], "seconds": used_seconds(dict(a)),
@@ -1948,7 +1956,9 @@ def exam_gradebook(exam_id: int, db=Depends(get_db)):
     owner = seat_owner(db, exam)
     return {"exam": {"id": exam_id, "title": exam["title"]},
             "questions": [{"no": n + 1, "id": q["id"], "type": q["type"], "points": q["points"],
-                           "name": item_name(q["tags"], q["stem"])} for n, q in enumerate(qs)],
+                           "name": item_name(q["tags"], q["stem"]), "stem": q["stem"], "code": q["code"],
+                           "options": json.loads(q["options"]), "answer": json.loads(q["answer"]),
+                           "case_sensitive": bool(q["case_sensitive"])} for n, q in enumerate(qs)],
             "max_score": sum(q["points"] for q in qs), "rows": rows,
             "owner": owner, "grade_order": grade_order_view(db, owner) if owner else None}
 

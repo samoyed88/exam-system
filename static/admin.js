@@ -786,6 +786,7 @@
   // ── 成績總表 ──
 
   let grades = null;
+  let gq = 0;                  // 逐題檢視目前的題目（索引）
   const MARK = { right: '<span class="mark-right" title="答對">✓</span>', wrong: '<span class="mark-wrong" title="答錯">✗</span>',
     partial: '<span class="mark-partial" title="部分得分">◐</span>', blank: '<span class="mark-blank" title="未作答">－</span>' };
 
@@ -840,7 +841,13 @@
   });
 
   function renderGrades() {
-    const g = grades, byResp = $('grades-mode').value === 'response';
+    const perQuestion = $('grades-mode').value === 'question';
+    $('grades-q').classList.toggle('hidden', !perQuestion);
+    $('grades-table-wrap').classList.toggle('hidden', perQuestion);
+    $('grades-sort').querySelector('[value=high]').textContent = perQuestion ? '本題得分高 → 低' : '成績高 → 低';
+    $('grades-sort').querySelector('[value=low]').textContent = perQuestion ? '本題得分低 → 高' : '成績低 → 高';
+    if (perQuestion) return renderQuestionView();
+    const g = grades;
     const rows = g.rows.slice();
     const sort = $('grades-sort').value;
     if (sort === 'high') rows.sort((a, b) => b.score - a.score);
@@ -850,9 +857,7 @@
     const body = rows.map(r => '<tr><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
       '<td>' + esc(r.student_id) + '</td><td>' + esc(fmtTime(r.started_at)) + '</td><td>' + esc(fmtTime(r.submitted_at)) + '</td>' +
       '<td>' + fmtSec(r.seconds) + '</td><td class="num"><b>' + fmtNum(r.score) + '</b></td>' +
-      r.cells.map(c => byResp
-        ? '<td class="resp">' + MARK[c.state] + ' ' + esc(c.response || '') + '</td>'
-        : '<td class="num">' + MARK[c.state] + (c.score == null ? '' : ' ' + fmtNum(c.score)) + '</td>').join('') + '</tr>').join('');
+      r.cells.map(c => '<td class="num">' + MARK[c.state] + (c.score == null ? '' : ' ' + fmtNum(c.score)) + '</td>').join('') + '</tr>').join('');
     const n = rows.length;
     const avg = n ? '<tr class="avg-row"><td colspan="5">整體平均（' + n + ' 人）</td><td class="num">' + fmtNum(rows.reduce((s, r) => s + r.score, 0) / n) + '</td>' +
       g.questions.map((q, k) => {
@@ -861,6 +866,75 @@
       }).join('') + '</tr>' : '';
     $('grades-table').innerHTML = head + (body || '<tr><td colspan="' + (6 + g.questions.length) + '" class="muted">還沒有人交卷。</td></tr>') + avg;
   }
+
+  // ── 逐題檢視：一次一題，列出每位學生的答案與得分；填充題每一格分開判斷 ──
+
+  function renderQuestionView() {
+    const g = grades;
+    if (!g.questions.length) { $('gq-table').innerHTML = '<tr><td class="muted">這場考試沒有題目。</td></tr>'; return; }
+    gq = Math.max(0, Math.min(gq, g.questions.length - 1));
+    const q = g.questions[gq], n = g.rows.length;
+    const rate = k => n ? Math.round(g.rows.reduce((s, r) => s + (r.cells[k].score || 0), 0) / n / (g.questions[k].points || 1) * 100) : 0;
+    $('gq-chips').innerHTML = g.questions.map((x, k) => '<button data-q="' + k + '" class="' + (k === gq ? 'active' : '') + '" title="' + esc(x.name) + '">Q' + x.no +
+      '<small>' + rate(k) + '%</small></button>').join('');
+    $('gq-prev').disabled = gq === 0;
+    $('gq-next').disabled = gq === g.questions.length - 1;
+    $('gq-no').textContent = '第 ' + q.no + ' 題';
+    $('gq-type').textContent = TYPE_TEXT[q.type];
+    $('gq-meta').textContent = q.name + '・配分 ' + fmtNum(q.points) + '・答對率 ' + rate(gq) + '%' + (q.case_sensitive ? '・區分大小寫' : '');
+    $('gq-stem').textContent = q.stem;
+    $('gq-code').textContent = q.code;
+    $('gq-code-wrap').classList.toggle('hidden', !q.code);
+    $('gq-code-wrap').open = q.type === 'fill';
+    $('gq-key').innerHTML = '<b>正確答案</b>　' + (q.type === 'fill'
+      ? q.answer.map((alts, b) => (q.answer.length > 1 ? '第 ' + (b + 1) + ' 格 ' : '') + alts.map(a => '<code>' + esc(a) + '</code>').join(' 或 ')).join('　')
+      : q.answer.map(i => '<code>' + LETTERS[i] + '. ' + esc(q.options[i]) + '</code>').join(' '));
+    const states = { right: 0, partial: 0, wrong: 0, blank: 0 };
+    g.rows.forEach(r => states[r.cells[gq].state]++);
+    const f = $('gq-filter').value;
+    let rows = g.rows.filter(r => f === 'all' || r.cells[gq].state === f);
+    const sort = $('grades-sort').value;
+    if (sort === 'high') rows = rows.slice().sort((a, b) => (b.cells[gq].score || 0) - (a.cells[gq].score || 0));
+    if (sort === 'low') rows = rows.slice().sort((a, b) => (a.cells[gq].score || 0) - (b.cells[gq].score || 0));
+    $('gq-count').textContent = '答對 ' + states.right + '・部分 ' + states.partial + '・答錯 ' + states.wrong + '・未作答 ' + states.blank + '（共 ' + n + ' 人）';
+    const blanks = q.type === 'fill' ? q.answer.length : 0;
+    // 填充題每一格一行，直排在同一欄裡，格數再多也不用左右捲動
+    const blankLine = (b, k) => '<div class="blank-line ' + (b.ok ? 'ok' : 'ng') + '">' +
+      (blanks > 1 ? '<span class="blank-no">' + (k + 1) + '</span>' : '') + (b.ok ? '✓ ' : '✗ ') +
+      (b.text ? '<span class="blank-text">' + esc(b.text) + '</span>' : '<span class="muted">（空白）</span>') +
+      (!b.ok && b.text ? '<button class="btn ghost sm accept" data-accept-q="' + q.id + '" data-blank="' + k + '" data-text="' + esc(b.text) + '">算對</button>' : '') + '</div>';
+    const head = '<tr><th style="width:96px">學號</th><th style="width:96px">姓名</th><th class="num" style="width:92px">得分 / ' + fmtNum(q.points) + '</th>' +
+      '<th>' + (blanks > 1 ? '學生答案（第 1～' + blanks + ' 格）' : '學生答案') + '</th></tr>';
+    $('gq-table').innerHTML = head + (rows.map(r => {
+      const c = r.cells[gq];
+      const answer = blanks
+        ? '<td class="blank-cell">' + c.blanks.map(blankLine).join('') + '</td>'
+        : '<td class="ans-text">' + MARK[c.state] + ' ' + (c.response ? esc(c.response) : '<span class="muted">未作答</span>') + '</td>';
+      return '<tr><td>' + esc(r.student_id) + '</td><td><a href="#" class="link-cell" data-attempt="' + r.attempt_id + '">' + esc(r.name) + '</a></td>' +
+        '<td class="num">' + MARK[c.state] + ' ' + (c.score == null ? '0' : fmtNum(c.score)) + '</td>' + answer + '</tr>';
+    }).join('') || '<tr><td colspan="4" class="muted">沒有符合的學生</td></tr>');
+  }
+
+  $('gq-chips').addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (b) { gq = +b.dataset.q; renderQuestionView(); } });
+  $('gq-prev').addEventListener('click', () => { gq--; renderQuestionView(); });
+  $('gq-next').addEventListener('click', () => { gq++; renderQuestionView(); });
+  $('gq-filter').addEventListener('change', renderQuestionView);
+  $('gq-table').addEventListener('click', async e => {
+    const a = e.target.closest('[data-attempt]');
+    if (a) { e.preventDefault(); openAttempt(+a.dataset.attempt, 'grades'); return; }
+    const t = e.target.closest('[data-accept-q]');
+    if (!t) return;
+    const same = grades.rows.filter(r => { const b = r.cells[gq].blanks[+t.dataset.blank]; return b && !b.ok && b.text.trim() === t.dataset.text.trim(); }).length;
+    if (!confirm('把第 ' + (+t.dataset.blank + 1) + ' 格的「' + t.dataset.text + '」也算對？\n這場有 ' + same + ' 人這樣寫，會加入題庫的可接受答案，並重新計算所有考過這題的分數。')) return;
+    try {
+      await call('POST', '/api/admin/questions/' + t.dataset.acceptQ + '/accept-fill', { question_id: +t.dataset.acceptQ, blank: +t.dataset.blank, text: t.dataset.text });
+      const keep = gq;
+      await loadGrades();
+      gq = keep;
+      renderGrades();
+      say('gq-msg', '已加入可接受答案並重新計分（' + same + ' 人）', true);
+    } catch (err) { say('gq-msg', err.message); }
+  });
 
   $('grades-table').addEventListener('click', e => {
     const a = e.target.closest('[data-attempt]');

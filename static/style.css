@@ -430,13 +430,33 @@ td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numer
 .explain dd { color: var(--text-muted); }
 .grades-wrap { max-height: 70vh; }
 .grades-wrap td, .grades-wrap th { white-space: nowrap; }
-.grades-wrap td.resp { white-space: normal; min-width: 8rem; max-width: 16rem; font-size: .82rem; }
 .mark-right { color: var(--ok); font-weight: 700; }
 .mark-wrong { color: var(--ng); font-weight: 700; }
 .mark-partial { color: #a86f12; font-weight: 700; }
 .mark-blank { color: var(--text-muted); }
 tr.avg-row td { font-weight: 700; background: var(--surface-2); border-top: 1.5px solid var(--rule); }
 @media (max-width: 640px) { .explain dl { grid-template-columns: 1fr; } }
+
+/* 逐題檢視 */
+.q-nav { display: flex; gap: .6rem; align-items: center; margin-bottom: .75rem; }
+.q-chips { display: flex; flex-wrap: wrap; gap: .3rem; flex: 1; justify-content: center; }
+.q-chips button { font: inherit; font-family: var(--mono); font-size: .8rem; min-width: 2.6rem; padding: .25rem .45rem; border: 1px solid var(--border-strong); background: #fff; border-radius: 2px; cursor: pointer; line-height: 1.25; }
+.q-chips button small { display: block; font-size: .68rem; color: var(--text-muted); }
+.q-chips button.active { background: var(--brand); border-color: var(--brand); color: #fff; }
+.q-chips button.active small { color: #c9d4e2; }
+.gq-key { margin-top: .6rem; padding-top: .6rem; border-top: 1px dashed var(--border-strong); font-size: .92rem; }
+.gq-key code { font-family: var(--mono); background: var(--ok-soft); color: var(--ok); padding: .05rem .35rem; border-radius: 2px; }
+.gq-wrap { max-height: 65vh; }
+.gq-wrap td { vertical-align: top; }
+.gq-wrap .ans-text { white-space: normal; min-width: 12rem; }
+.gq-wrap .blank-cell { white-space: normal; padding-top: .35rem; padding-bottom: .35rem; }
+.blank-line { font-family: var(--mono); font-size: .85rem; padding: .12rem .4rem; border-radius: 2px; display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+.blank-line + .blank-line { margin-top: 2px; }
+.blank-line.ok { color: var(--ok); }
+.blank-line.ng { color: var(--ng); background: var(--ng-soft); }
+.blank-line .blank-no { display: inline-block; min-width: 1.4rem; text-align: center; font-size: .72rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 2px; background: #fff; }
+.blank-line .blank-text { word-break: break-all; }
+.blank-line .accept { margin-left: auto; font-family: inherit; font-size: .72rem; padding: .05rem .5rem; }
 
 /* ── 操作日誌 ── */
 #log-table td { vertical-align: top; }
